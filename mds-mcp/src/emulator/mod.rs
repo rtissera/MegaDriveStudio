@@ -1,24 +1,11 @@
 // SPDX-License-Identifier: MIT
-//! Emulator actor: owns the libra context on a dedicated thread, drives the
-//! frame loop, and exposes an async command interface to the MCP layer.
-//!
-//! # Threading
-//! There is a single OS thread that calls into `libra_run` (libretro cores
-//! are not thread-safe). All access to the libra context flows through a
-//! `tokio::sync::mpsc::UnboundedSender<Command>`. Each command carries a
-//! `oneshot::Sender` that the worker uses to ship the response back.
-//!
-//! The worker also publishes resource-changed events on a
-//! `tokio::sync::broadcast::Sender<ResourceEvent>`; subscribers read these
-//! through `EmulatorActor::subscribe()`.
-//!
-//! # libra optionality
-//! Real FFI calls are gated by `#[cfg(libra_present)]` (set by `build.rs`
-//! when bindgen succeeded). If libra isn't linked, the worker still runs
-//! and serves the same protocol — every "frame" is a no-op and emulator-
-//! dependent fields are reported as defaults. This keeps the MCP smoke
-//! tests green even before the libretro core fork lands.
+//! Emulator actor: owns the libra context on a dedicated OS thread, drives
+//! the frame loop, exposes an async command interface to the MCP layer, and
+//! fans out resource-changed events on a broadcast channel. When libra
+//! isn't linked (`#[cfg(not(libra_present))]`) the worker still runs but
+//! every frame is a no-op.
 
+pub mod breakpoints;
 pub mod decode;
 pub mod frame;
 pub mod memory;
@@ -30,6 +17,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
+pub use breakpoints::{BpKind, BpSpace, Breakpoint, SharedBreakpoints};
 pub use memory::MemorySpace;
 
 /// Information returned by `mega_load_rom`.
@@ -94,7 +82,56 @@ pub enum Command {
     Screenshot {
         reply: Reply<Option<frame::Frame>>,
     },
+    StepInstruction {
+        n: u32,
+        reply: Reply<StepOutcome>,
+    },
+    SetBreakpoint {
+        addr: u32,
+        kind: BpKind,
+        space: BpSpace,
+        reply: Reply<SetBpOutcome>,
+    },
+    ClearBreakpoint {
+        id: u32,
+        reply: Reply<bool>,
+    },
+    ListBreakpoints {
+        reply: Reply<Vec<Breakpoint>>,
+    },
+    /// Resume after a halt-on-breakpoint event (no-op if not halted).
+    ContinueAfterHalt {
+        reply: Reply<u64>,
+    },
+    /// Test hook: force a breakpoint hit at the given PC. Used by
+    /// `tests/breakpoints.rs` to drive the no-libra mock backend until
+    /// agent A's libretro debug callback is wired in.
+    #[allow(dead_code)]
+    SimulateBreakpointHit {
+        pc: u32,
+        reply: Reply<Option<u32>>,
+    },
     Shutdown,
+}
+
+/// Result of `mega_step_instruction`. `granularity` is `"instruction"` when the
+/// libretro debug API is available, `"frame"` otherwise (graceful degradation).
+#[derive(Debug, Clone, Serialize)]
+pub struct StepOutcome {
+    pub pc: u32,
+    pub sr: u16,
+    pub frame: u64,
+    pub instructions_executed: u32,
+    pub granularity: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SetBpOutcome {
+    pub ok: bool,
+    pub id: u32,
+    /// `Some("debug_api_unavailable")` when the patched libretro core isn't
+    /// linked yet — tools surface this in the response.
+    pub reason: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -122,6 +159,10 @@ pub struct EmulatorActor {
     cmd_tx: mpsc::UnboundedSender<Command>,
     #[allow(dead_code)] // used via subscribe(); held alive for fan-out subscribers
     bcast_tx: broadcast::Sender<ResourceEvent>,
+    /// Shared handle to the breakpoint table. Cloned cheaply by the runner
+    /// thread on construction; the MCP layer also clones it to render the
+    /// `mega://breakpoints` resource without round-tripping the actor.
+    breakpoints: SharedBreakpoints,
 }
 
 impl EmulatorActor {
@@ -135,14 +176,25 @@ impl EmulatorActor {
     pub fn spawn(core_path: PathBuf) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Command>();
         let (bcast_tx, _) = broadcast::channel::<ResourceEvent>(128);
+        let breakpoints = SharedBreakpoints::new();
         let bcast_clone = bcast_tx.clone();
+        let bp_clone = breakpoints.clone();
         std::thread::Builder::new()
             .name("mds-emu".into())
             .spawn(move || {
-                runner::run(core_path, cmd_rx, bcast_clone);
+                runner::run(core_path, cmd_rx, bcast_clone, bp_clone);
             })
             .expect("spawn emulator thread");
-        Self { cmd_tx, bcast_tx }
+        Self {
+            cmd_tx,
+            bcast_tx,
+            breakpoints,
+        }
+    }
+
+    /// Snapshot of the current breakpoint table — cheap (one Arc clone).
+    pub fn breakpoints(&self) -> SharedBreakpoints {
+        self.breakpoints.clone()
     }
 
     #[allow(dead_code)] // wired up to MCP resources/subscribe in M3
@@ -231,6 +283,44 @@ impl EmulatorActor {
 
     pub fn shutdown(&self) {
         let _ = self.cmd_tx.send(Command::Shutdown);
+    }
+
+    pub async fn step_instruction(&self, n: u32) -> Result<StepOutcome> {
+        self.dispatch(|reply| Command::StepInstruction { n, reply }).await
+    }
+
+    pub async fn set_breakpoint(
+        &self,
+        addr: u32,
+        kind: BpKind,
+        space: BpSpace,
+    ) -> Result<SetBpOutcome> {
+        self.dispatch(|reply| Command::SetBreakpoint {
+            addr,
+            kind,
+            space,
+            reply,
+        })
+        .await
+    }
+
+    pub async fn clear_breakpoint(&self, id: u32) -> Result<bool> {
+        self.dispatch(|reply| Command::ClearBreakpoint { id, reply }).await
+    }
+
+    pub async fn list_breakpoints(&self) -> Result<Vec<Breakpoint>> {
+        self.dispatch(|reply| Command::ListBreakpoints { reply }).await
+    }
+
+    pub async fn continue_after_halt(&self) -> Result<u64> {
+        self.dispatch(|reply| Command::ContinueAfterHalt { reply }).await
+    }
+
+    /// Test-only helper used by `tests/breakpoints.rs`. Available without the
+    /// libretro core (relies on the no-libra mock runner backend).
+    #[allow(dead_code)]
+    pub async fn simulate_breakpoint_hit(&self, pc: u32) -> Result<Option<u32>> {
+        self.dispatch(|reply| Command::SimulateBreakpointHit { pc, reply }).await
     }
 }
 

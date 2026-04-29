@@ -1,11 +1,8 @@
 // SPDX-License-Identifier: MIT
-//! MCP tool surface — 19 tools covering control / memory / vdp / cpu / state.
-//!
-//! All tools live on `MdsServer` so the `#[tool_router]` and `#[tool_handler]`
-//! pair share the same `Self` type, which the macro requires. Tools that
-//! haven't reached implementation yet (M3 / M4) return a structured
-//! `not_implemented` payload rather than failing the call, so clients can
-//! discover the surface today and gate features by checking the response.
+//! MCP tool surface — 22 tools covering control / memory / vdp / cpu /
+//! state / breakpoints. Tools whose backing core feature isn't ready yet
+//! return a structured `not_implemented` / `debug_api_unavailable` payload
+//! rather than failing the call.
 
 #![allow(dead_code)]
 
@@ -16,7 +13,7 @@ use rmcp::{
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-use crate::emulator::{decode, frame as fbuf, MemorySpace};
+use crate::emulator::{breakpoints::BpKind, breakpoints::BpSpace, decode, frame as fbuf, MemorySpace};
 use crate::server::MdsServer;
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -169,12 +166,23 @@ impl MdsServer {
         })
     }
 
-    #[tool(description = "Step N 68k instructions (M3 — not yet wired up to the libretro core).")]
+    #[tool(description = "Step N 68k instructions (default 1) and pause. Returns {pc, sr, frame, instructions_executed, granularity}. `granularity` is \"instruction\" when the patched libretro core's debug API is linked, \"frame\" otherwise.")]
     async fn mega_step_instruction(
         &self,
-        Parameters(_args): Parameters<StepInstructionArgs>,
+        Parameters(args): Parameters<StepInstructionArgs>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        Ok(not_implemented("M3 — needs core-side instruction-step hook"))
+        let n = args.n.unwrap_or(1).clamp(1, 1_000_000);
+        Ok(match self.actor().step_instruction(n).await {
+            Ok(out) => ok_json(serde_json::json!({
+                "ok": true,
+                "pc": out.pc,
+                "sr": out.sr,
+                "frame": out.frame,
+                "instructions_executed": out.instructions_executed,
+                "granularity": out.granularity,
+            })),
+            Err(e) => err_text(format!("step_instruction failed: {e}")),
+        })
     }
 
     #[tool(description = "Read raw bytes from a memory space. Returns base64-encoded data.")]
@@ -323,30 +331,84 @@ impl MdsServer {
         }
     }
 
-    #[tool(description = "Decode the Z80 registers (M3 — pending the libretro core fork's Z80 state hook).")]
+    #[tool(description = "Decode the Z80 registers from the Z80 state blob plus the bus state blob. Returns {af, bc, de, hl, ix, iy, pc, sp, halt, iff1, iff2, im, cycles, bus_requested, bus_reset}.")]
     async fn mega_get_z80_registers(&self) -> Result<CallToolResult, rmcp::ErrorData> {
-        Ok(not_implemented("M3 — Z80 state blob hook not yet exposed"))
+        let state_blob = self
+            .actor()
+            .snapshot_region(MemorySpace::Z80)
+            .await
+            .unwrap_or_default();
+        let bus_blob = self
+            .actor()
+            .snapshot_region(MemorySpace::Z80Bus)
+            .await
+            .unwrap_or_default();
+        match decode::decode_z80(&state_blob, &bus_blob) {
+            Some(r) => Ok(ok_json(serde_json::to_value(&r).unwrap_or_default())),
+            None => Ok(not_implemented(
+                "z80 state blob unavailable (libretro core fork not linked yet)",
+            )),
+        }
     }
 
-    #[tool(description = "Set a breakpoint (M4).")]
+    #[tool(description = "Set a breakpoint. `kind`: \"exec\"|\"read\"|\"write\"|\"access\" (default \"exec\"). `space`: \"rom\"|\"ram\" (default \"ram\"). Returns {ok, id}; sets `reason:\"debug_api_unavailable\"` when the patched libretro core's debug API isn't linked yet (the BP is still registered for `mega_list_breakpoints`).")]
     async fn mega_set_breakpoint(
         &self,
-        Parameters(_args): Parameters<BreakpointArgs>,
+        Parameters(args): Parameters<BreakpointArgs>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        Ok(not_implemented("M4 — breakpoints arrive with the GDB-stub layer"))
+        let Some(addr) = args.addr else {
+            return Ok(err_text("missing required field: addr"));
+        };
+        let kind = match args.kind.as_deref() {
+            Some(s) => match BpKind::parse(s) {
+                Some(k) => k,
+                None => return Ok(err_text(format!("unknown breakpoint kind: {s:?}"))),
+            },
+            None => BpKind::Exec,
+        };
+        let space = match args.space.as_deref() {
+            Some(s) => match BpSpace::parse(s) {
+                Some(k) => k,
+                None => return Ok(err_text(format!("unknown breakpoint space: {s:?}"))),
+            },
+            None => BpSpace::Ram,
+        };
+        Ok(match self.actor().set_breakpoint(addr, kind, space).await {
+            Ok(out) => {
+                let mut v = serde_json::json!({"ok": out.ok, "id": out.id});
+                if let Some(reason) = out.reason {
+                    v["reason"] = serde_json::Value::String(reason.to_string());
+                }
+                ok_json(v)
+            }
+            Err(e) => err_text(format!("set_breakpoint failed: {e}")),
+        })
     }
 
-    #[tool(description = "Clear a breakpoint by id (M4).")]
+    #[tool(description = "Clear a breakpoint by id. Returns {ok, removed}.")]
     async fn mega_clear_breakpoint(
         &self,
-        Parameters(_args): Parameters<ClearBreakpointArgs>,
+        Parameters(args): Parameters<ClearBreakpointArgs>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        Ok(not_implemented("M4 — breakpoints arrive with the GDB-stub layer"))
+        Ok(match self.actor().clear_breakpoint(args.id).await {
+            Ok(removed) => ok_json(serde_json::json!({"ok": true, "removed": removed})),
+            Err(e) => err_text(format!("clear_breakpoint failed: {e}")),
+        })
     }
 
-    #[tool(description = "Continue execution after a breakpoint (alias for resume in M2).")]
+    #[tool(description = "List active breakpoints. Returns {breakpoints: [{id, addr, kind, space, hit_count, enabled}, ...]}.")]
+    async fn mega_list_breakpoints(&self) -> Result<CallToolResult, rmcp::ErrorData> {
+        Ok(match self.actor().list_breakpoints().await {
+            Ok(list) => ok_json(serde_json::json!({
+                "breakpoints": list,
+            })),
+            Err(e) => err_text(format!("list_breakpoints failed: {e}")),
+        })
+    }
+
+    #[tool(description = "Continue execution after a breakpoint halt. If the emulator isn't halted-on-BP, behaves like `mega_resume`. Returns the current frame counter.")]
     async fn mega_continue(&self) -> Result<CallToolResult, rmcp::ErrorData> {
-        Ok(match self.actor().resume().await {
+        Ok(match self.actor().continue_after_halt().await {
             Ok(frame) => ok_json(serde_json::json!({"ok": true, "frame": frame})),
             Err(e) => err_text(format!("continue failed: {e}")),
         })

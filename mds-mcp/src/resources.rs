@@ -1,10 +1,7 @@
 // SPDX-License-Identifier: MIT
-//! `mega://*` resource catalogue + read/subscribe routing.
-//!
-//! The catalogue is the authoritative list returned to `resources/list` and
-//! used to validate `resources/read` URIs. Subscriptions are tracked in a
-//! `parking_lot::Mutex<HashSet<String>>` per `MdsServer`; subscriber-side
-//! delivery happens on the broadcast channel exposed by `EmulatorActor`.
+//! `mega://*` resource catalogue + read/subscribe routing. The catalogue is
+//! the authoritative list returned to `resources/list`. Subscriber delivery
+//! happens on the broadcast channel exposed by `EmulatorActor`.
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use rmcp::model::{AnnotateAble, RawResource, Resource, ResourceContents};
@@ -32,6 +29,10 @@ pub enum ResourceSource {
     M68kJson,
     /// Framebuffer (M3).
     FramebufferPng,
+    /// Decoded Z80 register snapshot (M4).
+    Z80Json,
+    /// Live breakpoint list (M4).
+    BreakpointsJson,
 }
 
 pub const CATALOGUE: &[ResourceDef] = &[
@@ -83,6 +84,20 @@ pub const CATALOGUE: &[ResourceDef] = &[
         description: "PNG-encoded current framebuffer (M3).",
         mime_type: "image/png",
         source: ResourceSource::FramebufferPng,
+    },
+    ResourceDef {
+        uri: "mega://z80/registers",
+        name: "Z80 registers",
+        description: "Decoded Z80 register snapshot (AF/BC/DE/HL/IX/IY/PC/SP + IFF/IM/cycles + bus state).",
+        mime_type: "application/json",
+        source: ResourceSource::Z80Json,
+    },
+    ResourceDef {
+        uri: "mega://breakpoints",
+        name: "Breakpoints",
+        description: "Live list of registered breakpoints (id, addr, kind, space, hit_count, enabled).",
+        mime_type: "application/json",
+        source: ResourceSource::BreakpointsJson,
     },
 ];
 
@@ -183,6 +198,45 @@ pub async fn read_contents(
                 uri: def.uri.into(),
                 mime_type: Some(def.mime_type.into()),
                 text: serde_json::to_string(&regs).unwrap_or_else(|_| "{}".into()),
+                meta: None,
+            }
+        }
+        ResourceSource::Z80Json => {
+            // Cached JSON if the broadcast pump has published it.
+            if let Some(b) = cached(cache, def.uri) {
+                if !b.is_empty() {
+                    if let Ok(s) = String::from_utf8(b) {
+                        return ResourceContents::TextResourceContents {
+                            uri: def.uri.into(),
+                            mime_type: Some(def.mime_type.into()),
+                            text: s,
+                            meta: None,
+                        };
+                    }
+                }
+            }
+            let state_blob = actor
+                .snapshot_region(MemorySpace::Z80)
+                .await
+                .unwrap_or_default();
+            let bus_blob = actor
+                .snapshot_region(MemorySpace::Z80Bus)
+                .await
+                .unwrap_or_default();
+            let regs = decode::decode_z80(&state_blob, &bus_blob).unwrap_or_default();
+            ResourceContents::TextResourceContents {
+                uri: def.uri.into(),
+                mime_type: Some(def.mime_type.into()),
+                text: serde_json::to_string(&regs).unwrap_or_else(|_| "{}".into()),
+                meta: None,
+            }
+        }
+        ResourceSource::BreakpointsJson => {
+            let snap = actor.breakpoints().snapshot();
+            ResourceContents::TextResourceContents {
+                uri: def.uri.into(),
+                mime_type: Some(def.mime_type.into()),
+                text: serde_json::to_string(&snap.entries).unwrap_or_else(|_| "[]".into()),
                 meta: None,
             }
         }

@@ -74,9 +74,10 @@ impl ServerHandler for MdsServer {
         .with_protocol_version(ProtocolVersion::V_2024_11_05)
         .with_server_info(server_info)
         .with_instructions(
-            "Megadrive Studio MCP server (M2). 19 tools across control / memory / vdp / cpu / state. \
-             7 subscribable resources under mega://*. Some tools (step_instruction, screenshot, \
-             breakpoints, z80 regs) return {ok:false, not_implemented:true} until M3/M4.",
+            "Megadrive Studio MCP server (M4). 22 tools across control / memory / vdp / cpu / \
+             state / breakpoints. 9 subscribable resources under mega://*. Step + breakpoints \
+             gracefully degrade to {granularity:\"frame\"} / {reason:\"debug_api_unavailable\"} \
+             when the patched libretro core fork's debug API isn't linked.",
         )
     }
 

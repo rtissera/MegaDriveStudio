@@ -168,13 +168,15 @@ jobs:
                       mega_read_memory mega_write_memory \
                       mega_get_vdp_registers mega_get_palettes mega_get_sprites \
                       mega_dump_tile mega_get_68k_registers mega_get_z80_registers \
-                      mega_set_breakpoint mega_clear_breakpoint mega_continue \
-                      mega_screenshot mega_save_state mega_load_state mega_get_status; do
+                      mega_set_breakpoint mega_clear_breakpoint mega_list_breakpoints \
+                      mega_continue mega_screenshot mega_save_state mega_load_state \
+                      mega_get_status; do
             grep -q "\"$tool\"" /tmp/mcp-out.txt || { echo "missing tool: $tool"; exit 1; }
           done
           for uri in "mega://vram" "mega://cram" "mega://vsram" \
                      "mega://vdp/registers" "mega://sprites" \
-                     "mega://m68k/registers" "mega://framebuffer"; do
+                     "mega://m68k/registers" "mega://framebuffer" \
+                     "mega://z80/registers" "mega://breakpoints"; do
             grep -q "\"$uri\"" /tmp/mcp-out.txt || { echo "missing resource: $uri"; exit 1; }
           done
           echo "MCP smoke OK (tools + resources)"

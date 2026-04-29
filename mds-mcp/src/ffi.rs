@@ -38,3 +38,23 @@ pub const LIBRA_MEMORY_VSRAM: u32 = 0x101;
 pub const LIBRA_MEMORY_VDP_STATE: u32 = 0x102;
 pub const LIBRA_MEMORY_M68K: u32 = 0x103;
 pub const LIBRA_MEMORY_Z80: u32 = 0x104;
+/// Z80 work-RAM (8 KiB at 68k bus $A00000–$A01FFF). M4 — pending agent A's
+/// patched libretro core fork. The header `libra-extended-memory.h` will
+/// gain this constant once the bump lands; we define it locally so the rest
+/// of the crate compiles whether or not bindgen has seen it. When the bump
+/// arrives, bindgen produces an identical `pub const` and the linker uses
+/// either definition (the values match).
+pub const LIBRA_MEMORY_Z80_RAM: u32 = 0x105;
+/// Z80 bus state (BUSREQ/BUSRESET). Two bytes packed: [bus_requested, bus_reset].
+pub const LIBRA_MEMORY_Z80_BUS: u32 = 0x108;
+
+/// libretro env extension exposing the debug API surface. Single ID returns a
+/// `LibraDebugInterface*` populated with function pointers for halt request,
+/// breakpoint registration, and watchpoint registration. Agreed with agent A.
+pub const RETRO_ENVIRONMENT_GET_MD_DEBUG_INTERFACE: u32 = 0x10001;
+
+/// Breakpoint kind bitmask passed into the libretro debug API.
+pub const LIBRA_BP_EXEC: u32 = 1 << 0;
+pub const LIBRA_BP_READ: u32 = 1 << 1;
+pub const LIBRA_BP_WRITE: u32 = 1 << 2;
+pub const LIBRA_BP_ACCESS: u32 = LIBRA_BP_READ | LIBRA_BP_WRITE;

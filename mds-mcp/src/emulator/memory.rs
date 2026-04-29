@@ -1,11 +1,8 @@
 // SPDX-License-Identifier: MIT
 //! Memory-space taxonomy and (unsafe) read/write helpers around
-//! `libra_get_memory_data` / `libra_get_memory_size`.
-//!
-//! All `unsafe` is isolated in this module. Callers must guarantee that the
-//! emulator thread is the sole owner of `libra_ctx_t` and either (a) is
-//! provably idle (paused, between frames), or (b) holds the command queue
-//! that drives the frame loop.
+//! `libra_get_memory_data` / `libra_get_memory_size`. All `unsafe` is
+//! isolated here; callers must guarantee the emulator thread is the sole
+//! owner of `libra_ctx_t` and is provably idle.
 
 use serde::Serialize;
 
@@ -26,6 +23,10 @@ pub enum MemorySpace {
     M68kState,
     /// Z80 register blob (clownmdemu fork; LIBRA_MEMORY_Z80).
     Z80,
+    /// Z80 work-RAM (8 KiB; LIBRA_MEMORY_Z80_RAM).
+    Z80Ram,
+    /// Z80 bus state (BUSREQ/BUSRESET; LIBRA_MEMORY_Z80_BUS).
+    Z80Bus,
 }
 
 impl MemorySpace {
@@ -40,6 +41,8 @@ impl MemorySpace {
             "vdp_state" => Self::VdpState,
             "m68k_state" => Self::M68kState,
             "z80" => Self::Z80,
+            "z80ram" | "z80_ram" => Self::Z80Ram,
+            "z80bus" | "z80_bus" => Self::Z80Bus,
             _ => return None,
         })
     }
@@ -57,6 +60,8 @@ impl MemorySpace {
             Self::VdpState => ffi::LIBRA_MEMORY_VDP_STATE,
             Self::M68kState => ffi::LIBRA_MEMORY_M68K,
             Self::Z80 => ffi::LIBRA_MEMORY_Z80,
+            Self::Z80Ram => ffi::LIBRA_MEMORY_Z80_RAM,
+            Self::Z80Bus => ffi::LIBRA_MEMORY_Z80_BUS,
             Self::Rom => return None,
         })
     }

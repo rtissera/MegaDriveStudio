@@ -1,10 +1,8 @@
 // SPDX-License-Identifier: MIT
-//! Emulator-thread frame loop.
-//!
-//! Drains the command queue between frames. While running, calls
-//! `libra_run` (≤16.7 ms wall-clock target) and re-CRCs the libretro memory
-//! regions; differences fan out to subscribers as `ResourceEvent`s. While
-//! paused, blocks on `cmd_rx.blocking_recv()` so the thread sleeps cleanly.
+//! Emulator-thread frame loop. Drains the command queue between frames,
+//! calls `libra_run` (≤16.7 ms wall-clock target), CRC-diffs libretro
+//! memory regions, and fans changes out as `ResourceEvent`s. While paused,
+//! blocks on `cmd_rx.blocking_recv()`.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -13,12 +11,13 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::{broadcast, mpsc};
 
+use super::breakpoints::{Breakpoint, SharedBreakpoints};
 use super::decode;
 use super::frame::{self, FrameSlot};
 #[cfg(libra_present)]
 use super::frame::PixelFormat;
 use super::memory;
-use super::{Command, MemorySpace, ResourceEvent, RomInfo, Status};
+use super::{Command, MemorySpace, ResourceEvent, RomInfo, SetBpOutcome, Status, StepOutcome};
 use crate::ffi;
 
 const FRAME_DURATION: Duration = Duration::from_micros(16_667);
@@ -161,10 +160,17 @@ struct State {
     frames_in_window: u32,
     region_crcs: HashMap<&'static str, u32>,
     saved_states: HashMap<u32, Vec<u8>>,
+    breakpoints: SharedBreakpoints,
+    next_bp_id: u32,
+    /// Set when the BP callback (or simulator) hit a breakpoint.
+    halted_on_bp: Option<u32>,
+    /// True when agent A's debug API is wired in. Until then we serve the
+    /// graceful-degradation responses from set_breakpoint / step_instruction.
+    debug_api_available: bool,
 }
 
 impl State {
-    fn new(core_path: PathBuf) -> Self {
+    fn new(core_path: PathBuf, breakpoints: SharedBreakpoints) -> Self {
         Self {
             libra: LibraCtx::new().expect("libra_create returned null"),
             core_path,
@@ -177,6 +183,11 @@ impl State {
             frames_in_window: 0,
             region_crcs: HashMap::new(),
             saved_states: HashMap::new(),
+            breakpoints,
+            next_bp_id: 1,
+            halted_on_bp: None,
+            // Probed at load_core time once agent A's env extension lands.
+            debug_api_available: false,
         }
     }
 }
@@ -185,8 +196,9 @@ pub fn run(
     core_path: PathBuf,
     mut cmd_rx: mpsc::UnboundedReceiver<Command>,
     bcast: broadcast::Sender<ResourceEvent>,
+    breakpoints: SharedBreakpoints,
 ) {
-    let mut state = State::new(core_path);
+    let mut state = State::new(core_path, breakpoints);
     let mut next_frame = Instant::now() + FRAME_DURATION;
 
     loop {
@@ -352,6 +364,129 @@ fn handle_command(
         Command::Screenshot { reply } => {
             let _ = reply.send(Ok(state.libra.frame_slot().snapshot()));
         }
+        Command::StepInstruction { n, reply } => {
+            let r = step_instruction(state, n, bcast);
+            let _ = reply.send(r);
+        }
+        Command::SetBreakpoint {
+            addr,
+            kind,
+            space,
+            reply,
+        } => {
+            let id = state.next_bp_id;
+            state.next_bp_id = state.next_bp_id.wrapping_add(1);
+            state.breakpoints.update(|t| {
+                t.add(Breakpoint {
+                    id,
+                    addr,
+                    kind,
+                    space,
+                    hit_count: 0,
+                    enabled: true,
+                });
+            });
+            publish_breakpoints(state, bcast);
+            let _ = reply.send(Ok(SetBpOutcome {
+                ok: true,
+                id,
+                // The BP is still recorded in the table; activates once the
+                // patched core exposes the debug callback API.
+                reason: if state.debug_api_available {
+                    None
+                } else {
+                    Some("debug_api_unavailable")
+                },
+            }));
+        }
+        Command::ClearBreakpoint { id, reply } => {
+            let removed = state.breakpoints.update(|t| t.remove(id));
+            if removed {
+                publish_breakpoints(state, bcast);
+            }
+            let _ = reply.send(Ok(removed));
+        }
+        Command::ListBreakpoints { reply } => {
+            let snap = state.breakpoints.snapshot();
+            let _ = reply.send(Ok(snap.entries.clone()));
+        }
+        Command::ContinueAfterHalt { reply } => {
+            state.halted_on_bp = None;
+            state.paused = false;
+            let _ = reply.send(Ok(state.frame));
+        }
+        Command::SimulateBreakpointHit { pc, reply } => {
+            let snap = state.breakpoints.snapshot();
+            let hit = snap.find_exec(pc);
+            if let Some((id, _)) = hit {
+                state.breakpoints.update(|t| {
+                    if let Some(b) = t.entries.iter_mut().find(|b| b.id == id) {
+                        b.hit_count += 1;
+                    }
+                });
+                state.halted_on_bp = Some(id);
+                state.paused = true;
+                publish_breakpoints(state, bcast);
+                let _ = reply.send(Ok(Some(id)));
+            } else {
+                let _ = reply.send(Ok(None));
+            }
+        }
+    }
+}
+
+fn step_instruction(
+    state: &mut State,
+    n: u32,
+    bcast: &broadcast::Sender<ResourceEvent>,
+) -> anyhow::Result<StepOutcome> {
+    if state.rom_bytes.is_none() {
+        anyhow::bail!("no ROM loaded");
+    }
+    let n = n.clamp(1, 1_000_000);
+    // When agent A's debug API is wired in: call `Clown68000_RequestHalt`
+    // after `n` instructions, then run a frame so the core advances exactly
+    // that many instructions before halting. Until then we fall back to
+    // frame granularity and surface `granularity: "frame"` to the IDE.
+    for _ in 0..n {
+        state.libra.run_frame();
+        if !state.debug_api_available {
+            state.frame = state.frame.saturating_add(1);
+        }
+    }
+    publish_changes(state, bcast);
+    state.paused = true;
+
+    // Decode current PC/SR for the response so the IDE can refresh its CPU view.
+    let m68k_blob = unsafe {
+        memory::snapshot_region(state.libra.raw, ffi::LIBRA_MEMORY_M68K)
+    }
+    .unwrap_or_default();
+    let regs = decode::decode_m68k(&m68k_blob).unwrap_or_default();
+    Ok(StepOutcome {
+        pc: regs.pc,
+        sr: regs.sr,
+        frame: state.frame,
+        instructions_executed: if state.debug_api_available { n } else { 0 },
+        granularity: if state.debug_api_available {
+            "instruction"
+        } else {
+            "frame"
+        },
+    })
+}
+
+fn publish_breakpoints(state: &mut State, bcast: &broadcast::Sender<ResourceEvent>) {
+    if bcast.receiver_count() == 0 {
+        return;
+    }
+    let snap = state.breakpoints.snapshot();
+    if let Ok(payload) = serde_json::to_vec(&snap.entries) {
+        let _ = bcast.send(ResourceEvent {
+            uri: "mega://breakpoints",
+            mime: "application/json",
+            payload: Arc::new(payload),
+        });
     }
 }
 
@@ -466,17 +601,27 @@ fn publish_changes(state: &mut State, bcast: &broadcast::Sender<ResourceEvent>) 
         }
     }
 
-    // VDP registers — JSON.
-    if let Some(id) = MemorySpace::VdpState.libretro_id() {
-        if let Some(blob) = unsafe { memory::snapshot_region(state.libra.raw, id) } {
-            if !blob.is_empty() {
-                let crc = crc32fast::hash(&blob);
-                if state.region_crcs.get("mega://vdp/registers").copied() != Some(crc) {
-                    state.region_crcs.insert("mega://vdp/registers", crc);
-                    let regs = decode::decode_vdp_registers(&blob);
+    // Decoded JSON resources: VDP regs, 68k regs, Z80 regs.
+    publish_decoded(state, bcast, MemorySpace::VdpState, "mega://vdp/registers", |b| {
+        serde_json::to_vec(&decode::decode_vdp_registers(b)).ok()
+    });
+    publish_decoded(state, bcast, MemorySpace::M68kState, "mega://m68k/registers", |b| {
+        decode::decode_m68k(b).and_then(|r| serde_json::to_vec(&r).ok())
+    });
+    if let Some(id) = MemorySpace::Z80.libretro_id() {
+        let blob = unsafe { memory::snapshot_region(state.libra.raw, id) }.unwrap_or_default();
+        if !blob.is_empty() {
+            let crc = crc32fast::hash(&blob);
+            if state.region_crcs.get("mega://z80/registers").copied() != Some(crc) {
+                state.region_crcs.insert("mega://z80/registers", crc);
+                let bus_blob = MemorySpace::Z80Bus
+                    .libretro_id()
+                    .and_then(|id| unsafe { memory::snapshot_region(state.libra.raw, id) })
+                    .unwrap_or_default();
+                if let Some(regs) = decode::decode_z80(&blob, &bus_blob) {
                     if let Ok(s) = serde_json::to_vec(&regs) {
                         let _ = bcast.send(ResourceEvent {
-                            uri: "mega://vdp/registers",
+                            uri: "mega://z80/registers",
                             mime: "application/json",
                             payload: Arc::new(s),
                         });
@@ -484,6 +629,32 @@ fn publish_changes(state: &mut State, bcast: &broadcast::Sender<ResourceEvent>) 
                 }
             }
         }
+    }
+}
+
+fn publish_decoded(
+    state: &mut State,
+    bcast: &broadcast::Sender<ResourceEvent>,
+    space: MemorySpace,
+    uri: &'static str,
+    decode: impl FnOnce(&[u8]) -> Option<Vec<u8>>,
+) {
+    let Some(id) = space.libretro_id() else { return };
+    let Some(blob) = (unsafe { memory::snapshot_region(state.libra.raw, id) }) else { return };
+    if blob.is_empty() {
+        return;
+    }
+    let crc = crc32fast::hash(&blob);
+    if state.region_crcs.get(uri).copied() == Some(crc) {
+        return;
+    }
+    state.region_crcs.insert(uri, crc);
+    if let Some(payload) = decode(&blob) {
+        let _ = bcast.send(ResourceEvent {
+            uri,
+            mime: "application/json",
+            payload: Arc::new(payload),
+        });
     }
 }
 
