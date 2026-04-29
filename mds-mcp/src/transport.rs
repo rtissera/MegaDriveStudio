@@ -17,11 +17,12 @@ use rmcp::{
 };
 
 use crate::emulator::EmulatorActor;
+use crate::notifications::Notifier;
 use crate::server::MdsServer;
 
 /// Run the MCP server bound to stdin/stdout. Blocks until the client closes.
-pub async fn run_stdio(actor: EmulatorActor) -> Result<()> {
-    let server = MdsServer::new(actor.clone());
+pub async fn run_stdio(actor: EmulatorActor, notifier: Notifier) -> Result<()> {
+    let server = MdsServer::new(actor.clone(), notifier);
     let service = server.serve(stdio()).await?;
     service.waiting().await?;
     actor.shutdown();
@@ -32,7 +33,7 @@ pub async fn run_stdio(actor: EmulatorActor) -> Result<()> {
 /// service mounted at `/mcp`. The bind address is fixed to loopback —
 /// exposing the emulator over all interfaces would let any LAN host
 /// inject ROM bytes / read RAM.
-pub async fn run_http(actor: EmulatorActor, port: u16) -> Result<()> {
+pub async fn run_http(actor: EmulatorActor, notifier: Notifier, port: u16) -> Result<()> {
     let bind: SocketAddr = ([127, 0, 0, 1], port).into();
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let local = listener
@@ -43,8 +44,9 @@ pub async fn run_http(actor: EmulatorActor, port: u16) -> Result<()> {
 
     let session_manager = Arc::new(LocalSessionManager::default());
     let actor_for_factory = actor.clone();
+    let notifier_for_factory = notifier.clone();
     let service = StreamableHttpService::new(
-        move || Ok(MdsServer::new(actor_for_factory.clone())),
+        move || Ok(MdsServer::new(actor_for_factory.clone(), notifier_for_factory.clone())),
         session_manager,
         StreamableHttpServerConfig::default(),
     );

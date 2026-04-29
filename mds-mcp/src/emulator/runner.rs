@@ -14,6 +14,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc};
 
 use super::decode;
+use super::frame::{self, FrameSlot};
+#[cfg(libra_present)]
+use super::frame::PixelFormat;
 use super::memory;
 use super::{Command, MemorySpace, ResourceEvent, RomInfo, Status};
 use crate::ffi;
@@ -24,17 +27,46 @@ const FRAME_DURATION: Duration = Duration::from_micros(16_667);
 struct LibraCtx {
     raw: *mut ffi::libra_ctx,
     core_loaded: bool,
+    /// Heap-allocated frame slot whose pointer is handed to libra as `userdata`
+    /// and dereferenced from the C video callback. Held in a `Box` so the
+    /// pointer is stable for libra's lifetime.
+    frame_slot: Box<FrameSlot>,
+}
+
+#[cfg(libra_present)]
+unsafe extern "C" fn video_cb_trampoline(
+    ud: *mut std::ffi::c_void,
+    data: *const std::ffi::c_void,
+    w: std::ffi::c_uint,
+    h: std::ffi::c_uint,
+    pitch: usize,
+    pixel_format: std::ffi::c_int,
+) {
+    if ud.is_null() || data.is_null() || w == 0 || h == 0 || pixel_format < 0 {
+        return; // hardware-rendered frames signal pixel_format == -1.
+    }
+    let Some(fmt) = PixelFormat::from_libretro(pixel_format) else {
+        return;
+    };
+    let slot: &FrameSlot = unsafe { &*(ud as *const FrameSlot) };
+    let total = pitch.saturating_mul(h as usize);
+    if total == 0 {
+        return;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(data as *const u8, total) };
+    slot.store(w, h, pitch, fmt, bytes, 0);
 }
 
 #[cfg(libra_present)]
 impl LibraCtx {
     fn new() -> Option<Self> {
-        // Build a config with all callbacks NULL — we don't render or play
-        // audio in the MCP server. NULL audio specifically dodges the libra
-        // audio-resampler heap-corruption bug while the parallel agent
-        // finishes the patch.
+        // NULL audio specifically dodges the libra audio-resampler
+        // heap-corruption bug while the parallel agent finishes the patch.
         let mut cfg: ffi::libra_config_t = unsafe { std::mem::zeroed() };
         cfg.audio_output_rate = 48_000;
+        let frame_slot = Box::new(FrameSlot::new());
+        cfg.video = Some(video_cb_trampoline);
+        cfg.userdata = (&*frame_slot as *const FrameSlot) as *mut std::ffi::c_void;
         let raw = unsafe { ffi::libra_create(&cfg as *const _) };
         if raw.is_null() {
             return None;
@@ -42,7 +74,11 @@ impl LibraCtx {
         Some(Self {
             raw,
             core_loaded: false,
+            frame_slot,
         })
+    }
+    fn frame_slot(&self) -> &FrameSlot {
+        &self.frame_slot
     }
 
     fn load_core(&mut self, path: &str) -> bool {
@@ -87,6 +123,7 @@ impl Drop for LibraCtx {
 struct LibraCtx {
     raw: *mut ffi::libra_ctx,
     core_loaded: bool,
+    frame_slot: Box<FrameSlot>,
 }
 
 #[cfg(not(libra_present))]
@@ -95,6 +132,7 @@ impl LibraCtx {
         Some(Self {
             raw: std::ptr::null_mut(),
             core_loaded: false,
+            frame_slot: Box::new(FrameSlot::new()),
         })
     }
     fn load_core(&mut self, _: &str) -> bool {
@@ -104,6 +142,9 @@ impl LibraCtx {
         false
     }
     fn run_frame(&self) {}
+    fn frame_slot(&self) -> &FrameSlot {
+        &self.frame_slot
+    }
 }
 
 unsafe impl Send for LibraCtx {}
@@ -308,6 +349,9 @@ fn handle_command(
             let r = load_state(state, slot);
             let _ = reply.send(r);
         }
+        Command::Screenshot { reply } => {
+            let _ = reply.send(Ok(state.libra.frame_slot().snapshot()));
+        }
     }
 }
 
@@ -404,6 +448,22 @@ fn publish_changes(state: &mut State, bcast: &broadcast::Sender<ResourceEvent>) 
             mime,
             payload: Arc::new(snap),
         });
+    }
+
+    // Framebuffer — PNG (CRC the raw pixel buffer to dedup).
+    if let Some(fb) = state.libra.frame_slot().snapshot() {
+        let crc = crc32fast::hash(&fb.data);
+        if state.region_crcs.get("mega://framebuffer").copied() != Some(crc) {
+            state.region_crcs.insert("mega://framebuffer", crc);
+            let rgba = frame::to_rgba8(&fb);
+            if let Ok(png) = frame::rgba8_to_png(&rgba, fb.w, fb.h) {
+                let _ = bcast.send(ResourceEvent {
+                    uri: "mega://framebuffer",
+                    mime: "image/png",
+                    payload: Arc::new(png),
+                });
+            }
+        }
     }
 
     // VDP registers — JSON.

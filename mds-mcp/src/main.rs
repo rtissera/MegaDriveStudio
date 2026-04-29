@@ -13,12 +13,14 @@ use tracing_subscriber::EnvFilter;
 
 mod emulator;
 mod ffi;
+mod notifications;
 mod resources;
 mod server;
 mod tools;
 mod transport;
 
 use emulator::EmulatorActor;
+use notifications::Notifier;
 
 /// Megadrive Studio MCP server.
 #[derive(Debug, Parser)]
@@ -47,6 +49,11 @@ struct Cli {
         default_value = "vendor/clownmdemu-libretro/clownmdemu_libretro.so"
     )]
     core: PathBuf,
+
+    /// UI refresh rate cap in Hz for `notifications/resources/updated`
+    /// emission per URI (range 1..=30; default 4).
+    #[arg(long, value_name = "HZ", default_value_t = 4)]
+    ui_refresh_hz: u32,
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -71,10 +78,12 @@ async fn main() -> Result<()> {
     );
 
     let actor = EmulatorActor::spawn(cli.core.clone());
+    let notifier = Notifier::new(notifications::min_interval_for_hz(cli.ui_refresh_hz));
+    notifier.spawn(&actor);
 
     match port {
-        Some(p) => transport::run_http(actor, p).await?,
-        None => transport::run_stdio(actor).await?,
+        Some(p) => transport::run_http(actor, notifier, p).await?,
+        None => transport::run_stdio(actor, notifier).await?,
     }
     Ok(())
 }

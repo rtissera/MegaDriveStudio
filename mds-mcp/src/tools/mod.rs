@@ -16,7 +16,7 @@ use rmcp::{
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-use crate::emulator::{decode, MemorySpace};
+use crate::emulator::{decode, frame as fbuf, MemorySpace};
 use crate::server::MdsServer;
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -352,14 +352,42 @@ impl MdsServer {
         })
     }
 
-    #[tool(description = "Take a screenshot (M3 — defers to the libra video callback).")]
+    #[tool(description = "Take a screenshot of the current emulator framebuffer. format: \"png\" (default, base64) or \"raw\" (RGBA8 bytes, base64). Returns {ok:false, reason:\"no_frame_yet\"} if the video callback has not fired.")]
     async fn mega_screenshot(
         &self,
-        Parameters(_args): Parameters<ScreenshotArgs>,
+        Parameters(args): Parameters<ScreenshotArgs>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        Ok(not_implemented(
-            "M3 — needs the libra video callback wired into a host framebuffer",
-        ))
+        let frame = match self.actor().screenshot().await {
+            Ok(Some(f)) => f,
+            Ok(None) => {
+                return Ok(ok_json(serde_json::json!({
+                    "ok": false,
+                    "reason": "no_frame_yet"
+                })));
+            }
+            Err(e) => return Ok(err_text(format!("screenshot failed: {e}"))),
+        };
+        let want = args.format.as_deref().unwrap_or("png");
+        let rgba = fbuf::to_rgba8(&frame);
+        Ok(match want {
+            "raw" => ok_json(serde_json::json!({
+                "ok": true,
+                "format": "raw",
+                "width": frame.w,
+                "height": frame.h,
+                "data": B64.encode(&rgba),
+            })),
+            _ => match fbuf::rgba8_to_png(&rgba, frame.w, frame.h) {
+                Ok(png) => ok_json(serde_json::json!({
+                    "ok": true,
+                    "format": "png",
+                    "width": frame.w,
+                    "height": frame.h,
+                    "data": B64.encode(&png),
+                })),
+                Err(e) => err_text(format!("png encode failed: {e}")),
+            },
+        })
     }
 
     #[tool(description = "Save emulator state to a numbered slot (default 0).")]

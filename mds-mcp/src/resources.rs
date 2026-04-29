@@ -10,6 +10,7 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use rmcp::model::{AnnotateAble, RawResource, Resource, ResourceContents};
 
 use crate::emulator::{decode, EmulatorActor, MemorySpace};
+use crate::notifications::SnapshotCache;
 
 #[derive(Debug, Clone, Copy)]
 pub struct ResourceDef {
@@ -101,10 +102,24 @@ pub fn find(uri: &str) -> Option<&'static ResourceDef> {
     CATALOGUE.iter().find(|r| r.uri == uri)
 }
 
-pub async fn read_contents(actor: &EmulatorActor, def: &ResourceDef) -> ResourceContents {
+/// Look up a cached payload published by the emulator broadcast pump.
+fn cached(cache: Option<&SnapshotCache>, uri: &str) -> Option<Vec<u8>> {
+    let c = cache?;
+    let g = c.read();
+    g.get(uri).map(|(b, _)| b.to_vec())
+}
+
+pub async fn read_contents(
+    actor: &EmulatorActor,
+    def: &ResourceDef,
+    cache: Option<&SnapshotCache>,
+) -> ResourceContents {
     match def.source {
         ResourceSource::Region(space) => {
-            let bytes = actor.snapshot_region(space).await.unwrap_or_default();
+            let bytes = match cached(cache, def.uri) {
+                Some(b) if !b.is_empty() => b,
+                _ => actor.snapshot_region(space).await.unwrap_or_default(),
+            };
             ResourceContents::BlobResourceContents {
                 uri: def.uri.into(),
                 mime_type: Some(def.mime_type.into()),
@@ -113,6 +128,21 @@ pub async fn read_contents(actor: &EmulatorActor, def: &ResourceDef) -> Resource
             }
         }
         ResourceSource::VdpRegistersJson => {
+            // Cached JSON shortcut: the broadcast pump publishes the decoded
+            // JSON as the payload for this URI, so when present it's already
+            // the final text — return it as text directly.
+            if let Some(b) = cached(cache, def.uri) {
+                if !b.is_empty() {
+                    if let Ok(s) = String::from_utf8(b) {
+                        return ResourceContents::TextResourceContents {
+                            uri: def.uri.into(),
+                            mime_type: Some(def.mime_type.into()),
+                            text: s,
+                            meta: None,
+                        };
+                    }
+                }
+            }
             let blob = actor
                 .snapshot_region(MemorySpace::VdpState)
                 .await
@@ -156,12 +186,31 @@ pub async fn read_contents(actor: &EmulatorActor, def: &ResourceDef) -> Resource
                 meta: None,
             }
         }
-        ResourceSource::FramebufferPng => ResourceContents::BlobResourceContents {
-            uri: def.uri.into(),
-            mime_type: Some(def.mime_type.into()),
-            // Empty PNG sentinel until M3.
-            blob: B64.encode([] as [u8; 0]),
-            meta: None,
-        },
+        ResourceSource::FramebufferPng => {
+            // Prefer the most recent broadcast payload (already PNG-encoded).
+            if let Some(b) = cached(cache, def.uri) {
+                return ResourceContents::BlobResourceContents {
+                    uri: def.uri.into(),
+                    mime_type: Some(def.mime_type.into()),
+                    blob: B64.encode(&b),
+                    meta: None,
+                };
+            }
+            // Fall back to a one-shot capture via the actor.
+            let png = match actor.screenshot().await {
+                Ok(Some(frame)) => {
+                    let rgba = crate::emulator::frame::to_rgba8(&frame);
+                    crate::emulator::frame::rgba8_to_png(&rgba, frame.w, frame.h)
+                        .unwrap_or_default()
+                }
+                _ => Vec::new(),
+            };
+            ResourceContents::BlobResourceContents {
+                uri: def.uri.into(),
+                mime_type: Some(def.mime_type.into()),
+                blob: B64.encode(&png),
+                meta: None,
+            }
+        }
     }
 }

@@ -20,6 +20,7 @@
 //! tests green even before the libretro core fork lands.
 
 pub mod decode;
+pub mod frame;
 pub mod memory;
 pub mod runner;
 
@@ -89,6 +90,9 @@ pub enum Command {
     LoadState {
         slot: u32,
         reply: Reply<()>,
+    },
+    Screenshot {
+        reply: Reply<Option<frame::Frame>>,
     },
     Shutdown,
 }
@@ -219,6 +223,10 @@ impl EmulatorActor {
 
     pub async fn load_state(&self, slot: u32) -> Result<()> {
         self.dispatch(|reply| Command::LoadState { slot, reply }).await
+    }
+
+    pub async fn screenshot(&self) -> Result<Option<frame::Frame>> {
+        self.dispatch(|reply| Command::Screenshot { reply }).await
     }
 
     pub fn shutdown(&self) {

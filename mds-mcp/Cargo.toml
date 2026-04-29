@@ -41,6 +41,8 @@ crc32fast = "1.4.2"
 clap = { version = "4.5.20", features = ["derive"] }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 tokio-util = "0.7"
+bytes = "1.8"
+png = "0.17"
 
 [dev-dependencies]
 tokio = { version = "1.41", features = ["full", "process"] }

@@ -153,8 +153,16 @@ jobs:
             echo '{"jsonrpc":"2.0","method":"notifications/initialized"}'
             echo '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
             echo '{"jsonrpc":"2.0","id":3,"method":"resources/list"}'
+            echo '{"jsonrpc":"2.0","id":4,"method":"resources/subscribe","params":{"uri":"mega://vram"}}'
           ) | timeout 5 ./target/release/mds-mcp 2>/dev/null | tee /tmp/mcp-out.txt
           grep -q '"name":"mds-mcp"' /tmp/mcp-out.txt
+          # M3: server must advertise resources.subscribe (the
+          # notifications/resources/updated bridge depends on it) and
+          # accept a real subscribe call.
+          grep -q '"subscribe":true' /tmp/mcp-out.txt || \
+            { echo "missing resources.subscribe capability"; exit 1; }
+          grep -q '"id":4' /tmp/mcp-out.txt || \
+            { echo "no response to resources/subscribe id=4"; exit 1; }
           for tool in mega_load_rom mega_unload_rom mega_pause mega_resume \
                       mega_step_frame mega_step_instruction \
                       mega_read_memory mega_write_memory \

@@ -14,25 +14,31 @@ use rmcp::{
         ReadResourceRequestParams, ReadResourceResult, ServerCapabilities, ServerInfo,
         SubscribeRequestParams, UnsubscribeRequestParams,
     },
-    service::RequestContext,
+    service::{NotificationContext, RequestContext},
     tool_handler, ErrorData as McpError, RoleServer, ServerHandler,
 };
 
 use crate::emulator::EmulatorActor;
+use crate::notifications::{Notifier, SnapshotCache};
 use crate::resources;
 
 pub struct MdsServer {
     actor: EmulatorActor,
     pub(crate) tool_router: ToolRouter<MdsServer>,
     subscriptions: Arc<Mutex<HashSet<String>>>,
+    notifier: Notifier,
+    snapshot_cache: SnapshotCache,
 }
 
 impl MdsServer {
-    pub fn new(actor: EmulatorActor) -> Self {
+    pub fn new(actor: EmulatorActor, notifier: Notifier) -> Self {
+        let snapshot_cache = notifier.cache();
         Self {
             actor,
             tool_router: Self::tool_router(),
             subscriptions: Arc::new(Mutex::new(HashSet::new())),
+            notifier,
+            snapshot_cache,
         }
     }
 
@@ -47,6 +53,8 @@ impl Clone for MdsServer {
             actor: self.actor.clone(),
             tool_router: Self::tool_router(),
             subscriptions: self.subscriptions.clone(),
+            notifier: self.notifier.clone(),
+            snapshot_cache: self.snapshot_cache.clone(),
         }
     }
 }
@@ -92,8 +100,15 @@ impl ServerHandler for MdsServer {
         let def = resources::find(&request.uri).ok_or_else(|| {
             McpError::invalid_params(format!("unknown resource uri: {}", request.uri), None)
         })?;
-        let contents = resources::read_contents(&self.actor, def).await;
+        let contents =
+            resources::read_contents(&self.actor, def, Some(&self.snapshot_cache)).await;
         Ok(ReadResourceResult::new(vec![contents]))
+    }
+
+    async fn on_initialized(&self, context: NotificationContext<RoleServer>) {
+        // Register the freshly initialised peer so the broadcast pump can
+        // deliver `notifications/resources/updated` to it.
+        self.notifier.register_peer(context.peer);
     }
 
     async fn subscribe(

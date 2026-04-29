@@ -25,7 +25,10 @@
     "68000"
   ],
   "activationEvents": [
-    "workspaceContains:Makefile"
+    "workspaceContains:Makefile",
+    "onView:megadriveStudio.vram",
+    "onView:megadriveStudio.cram",
+    "onView:megadriveStudio.sprites"
   ],
   "contributes": {
     "commands": [
@@ -75,6 +78,21 @@
           "type": "string",
           "default": "",
           "description": "USB serial port for Mega Everdrive Pro (e.g. /dev/ttyACM0)."
+        },
+        "megadriveStudio.mcpServer": {
+          "type": "string",
+          "default": "sse://127.0.0.1:28765",
+          "description": "URL of the mds-mcp server. Use sse://host:port for Streamable-HTTP, or stdio:// to spawn locally."
+        },
+        "megadriveStudio.mcpAutoSpawn": {
+          "type": "boolean",
+          "default": true,
+          "description": "When true, the extension spawns mds-mcp itself on activation. When false, it expects an external instance at mcpServer."
+        },
+        "megadriveStudio.mdsMcpBinary": {
+          "type": "string",
+          "default": "",
+          "description": "Absolute path to the mds-mcp binary. Defaults to $workspace/mds-mcp/target/release/mds-mcp, then PATH."
         }
       }
     },
@@ -93,6 +111,15 @@
           "id": "megadriveStudio.romInfo",
           "name": "Mega Drive ROM"
         }
+      ],
+      "megadrive-studio": [
+        { "id": "megadriveStudio.vram",      "type": "webview", "name": "VRAM" },
+        { "id": "megadriveStudio.cram",      "type": "webview", "name": "CRAM" },
+        { "id": "megadriveStudio.sprites",   "name": "Sprites" },
+        { "id": "megadriveStudio.vdpRegs",   "name": "VDP registers (M4)" },
+        { "id": "megadriveStudio.m68kRegs",  "name": "68k registers (M4)" },
+        { "id": "megadriveStudio.planes",    "name": "Plane viewer (M4)" },
+        { "id": "megadriveStudio.memEdit",   "name": "Memory editor (M4)" }
       ]
     }
   },
@@ -101,6 +128,9 @@
     "watch": "tsc -watch -p ./",
     "package": "vsce package",
     "vscode:prepublish": "npm run compile"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0"
   },
   "devDependencies": {
     "@types/vscode": "^1.85.0",
