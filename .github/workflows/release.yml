@@ -116,13 +116,15 @@ jobs:
           npm run compile
           npx -y @vscode/vsce@latest package --no-dependencies --allow-missing-repository
 
-      # ── Stage vendored deps for download ────────────────────────────────────
-      - name: Stage vendored binaries
+      # ── Stage vendored libretro core for download ──────────────────────────
+      # liblibra.a is intentionally NOT shipped: it's statically linked into
+      # mds-mcp at build time. Distributing the archive separately is dead
+      # weight — only useful to someone building their own libretro frontend,
+      # who'd be cloning the repo anyway. Attribution stays in LICENSES/.
+      - name: Stage clownmdemu libretro core
         run: |
           cp vendor/clownmdemu-libretro/clownmdemu_libretro.so \
              "dist/clownmdemu_libretro-${{ steps.version.outputs.VERSION }}-linux-x64.so"
-          cp vendor/libra/build/liblibra.a \
-             "dist/liblibra-${{ steps.version.outputs.VERSION }}-linux-x64.a"
 
       # ── Self-contained Linux x64 bundle (VSCodium + ext + binaries) ────────
       - name: Resolve latest VSCodium Linux x64 tarball
@@ -173,11 +175,11 @@ jobs:
             --install-extension extensions/megadrive-studio/megadrive-studio-*.vsix \
             --force
 
-          # 3. Native binaries.
+          # 3. Native binaries. liblibra is statically linked into mds-mcp
+          #    so we don't ship it separately.
           cp mds-mcp/target/release/mds-mcp                       "$BUNDLE/bin/"
           cp tools/dump_vram                                       "$BUNDLE/bin/"
           cp vendor/clownmdemu-libretro/clownmdemu_libretro.so     "$BUNDLE/bin/"
-          cp vendor/libra/build/liblibra.a                         "$BUNDLE/bin/"
           chmod 0755 "$BUNDLE/bin/mds-mcp" "$BUNDLE/bin/dump_vram"
 
           # 4. Sample ROM (the same one that goes to the release).
@@ -252,7 +254,6 @@ jobs:
             bin/mds-mcp                   MCP server (on \$PATH inside)
             bin/dump_vram                 headless VRAM dump
             bin/clownmdemu_libretro.so    libretro core (AGPL)
-            bin/liblibra.a                static lib (MIT)
             examples/rom.bin              sample ROM from this release
             LICENSES/                     third-party license texts
 
@@ -286,7 +287,6 @@ jobs:
             echo "|---|---|---|"
             for f in "$ROM" "$MCP" "$CORE" \
                      dist/dump_vram-*-linux-x64 \
-                     dist/liblibra-*-linux-x64.a \
                      extensions/megadrive-studio-pack/*.vsix \
                      extensions/megadrive-studio/*.vsix; do
               [ -f "$f" ] || continue
@@ -345,7 +345,6 @@ jobs:
             dist/mds-mcp-${{ steps.version.outputs.VERSION }}-linux-x64
             dist/dump_vram-${{ steps.version.outputs.VERSION }}-linux-x64
             dist/clownmdemu_libretro-${{ steps.version.outputs.VERSION }}-linux-x64.so
-            dist/liblibra-${{ steps.version.outputs.VERSION }}-linux-x64.a
             dist/megadrive-studio-${{ steps.version.outputs.VERSION }}-linux-x64.tar.gz
             extensions/megadrive-studio-pack/*.vsix
             extensions/megadrive-studio/*.vsix
