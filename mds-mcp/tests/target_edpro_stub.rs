@@ -50,8 +50,8 @@ async fn edpro_stub_surface() {
         ("mega_save_state", json!({})),
         ("mega_load_state", json!({})),
     ];
-    let mut id = 100i64;
-    for (name, args) in blocked {
+    for (i, (name, args)) in blocked.into_iter().enumerate() {
+        let id = 100i64 + i as i64;
         let resp = c.call(id, name, args).await;
         let v = parse(&resp, name);
         assert_eq!(
@@ -62,7 +62,6 @@ async fn edpro_stub_surface() {
             v["reason"], "not_supported_on_target",
             "{name} reason must be not_supported_on_target, got {v}",
         );
-        id += 1;
     }
 
     let _ = c.child.kill().await;
