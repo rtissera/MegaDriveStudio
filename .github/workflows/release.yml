@@ -124,6 +124,150 @@ jobs:
           cp vendor/libra/build/liblibra.a \
              "dist/liblibra-${{ steps.version.outputs.VERSION }}-linux-x64.a"
 
+      # ── Self-contained Linux x64 bundle (VSCodium + ext + binaries) ────────
+      - name: Resolve latest VSCodium Linux x64 tarball
+        id: vscodium
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Latest stable VSCodium release; pick the linux-x64 (non-musl,
+          # non-arm, non-reh) tarball.
+          INFO=$(gh release view --repo VSCodium/vscodium \
+            --json tagName,assets \
+            -q '.tagName as $t
+                | .assets[]
+                | select(.name | test("^VSCodium-linux-x64-.*\\.tar\\.gz$"))
+                | "\($t)\t\(.url)\t\(.name)"' | head -n1)
+          TAG=$(echo "$INFO" | cut -f1)
+          URL=$(echo "$INFO" | cut -f2)
+          NAME=$(echo "$INFO" | cut -f3)
+          echo "tag=$TAG"   >> "$GITHUB_OUTPUT"
+          echo "url=$URL"   >> "$GITHUB_OUTPUT"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "Resolved VSCodium $TAG → $NAME"
+
+      - name: Download VSCodium tarball
+        run: |
+          curl -L --fail \
+            -o /tmp/vscodium.tar.gz \
+            "${{ steps.vscodium.outputs.url }}"
+          ls -lh /tmp/vscodium.tar.gz
+
+      - name: Assemble Linux bundle
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
+        run: |
+          set -euo pipefail
+          BUNDLE=/tmp/mds-bundle/megadrive-studio
+          mkdir -p "$BUNDLE"/{code,data/extensions,data/user,bin,examples,LICENSES}
+
+          # 1. VSCodium tree (extracts flat into code/)
+          tar -xzf /tmp/vscodium.tar.gz -C "$BUNDLE/code"
+
+          # 2. Pre-install our two MIT extensions (and let VSCodium pull
+          #    in whatever pack deps OpenVSX has).
+          "$BUNDLE/code/bin/codium" \
+            --user-data-dir /tmp/mds-bundle-user \
+            --extensions-dir "$BUNDLE/data/extensions" \
+            --install-extension extensions/megadrive-studio-pack/megadrive-studio-pack-*.vsix \
+            --install-extension extensions/megadrive-studio/megadrive-studio-*.vsix \
+            --force
+
+          # 3. Native binaries.
+          cp mds-mcp/target/release/mds-mcp                       "$BUNDLE/bin/"
+          cp tools/dump_vram                                       "$BUNDLE/bin/"
+          cp vendor/clownmdemu-libretro/clownmdemu_libretro.so     "$BUNDLE/bin/"
+          cp vendor/libra/build/liblibra.a                         "$BUNDLE/bin/"
+          chmod 0755 "$BUNDLE/bin/mds-mcp" "$BUNDLE/bin/dump_vram"
+
+          # 4. Sample ROM (the same one that goes to the release).
+          cp out/rom.bin "$BUNDLE/examples/rom.bin" || \
+            echo "(no out/rom.bin — bundle ships without examples/rom.bin)"
+
+          # 5. Licenses.
+          cp mds-mcp/LICENSE                                       "$BUNDLE/LICENSES/MDS-MIT.txt"
+          cp "$BUNDLE/code/resources/app/LICENSE.txt"              "$BUNDLE/LICENSES/VSCodium-MIT.txt"
+          cp vendor/libra/LICENSE                                  "$BUNDLE/LICENSES/libra-MIT.txt"
+          cp vendor/clownmdemu-libretro/LICENCE.txt                "$BUNDLE/LICENSES/clownmdemu-AGPL.txt"
+
+          CORE_SHA=$(git -C vendor/clownmdemu-libretro rev-parse HEAD)
+          cat > "$BUNDLE/LICENSES/README.txt" <<EOF
+          Megadrive Studio $VERSION — Linux x64 bundle
+          Third-party licenses summary
+          ============================
+
+          1. Megadrive Studio (this project)            — MIT  (MDS-MIT.txt)
+             megadrive-studio + megadrive-studio-pack extensions, mds-mcp,
+             dump_vram. https://github.com/rtissera/MegaDriveStudio
+          2. VSCodium (code/)                           — MIT  (VSCodium-MIT.txt)
+             https://github.com/VSCodium/vscodium
+             Chromium third-party notices: code/LICENSES.chromium.html
+          3. libra (vendored static lib)                — MIT  (libra-MIT.txt)
+             https://github.com/rtissera/libra
+          4. clownmdemu_libretro.so (loaded dynamically)
+                                                — AGPL-3.0-or-later  (clownmdemu-AGPL.txt)
+             https://github.com/rtissera/clownmdemu-libretro
+             Vendored commit: ${CORE_SHA}
+             Loaded at runtime via dlopen (RetroArch-style libretro core).
+             Binary corresponds 1:1 to the source tree at the SHA above.
+          EOF
+
+          # 6. start.sh + README.txt.
+          cat > "$BUNDLE/start.sh" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          HERE="$(cd "$(dirname "$0")" && pwd)"
+          export MDS_MCP="$HERE/bin/mds-mcp"
+          export MDS_CORE="$HERE/bin/clownmdemu_libretro.so"
+          export PATH="$HERE/bin:$PATH"
+          if [ "$#" -gt 0 ] && [ -e "$1" ]; then
+              OPEN_PATH="$1"
+              shift
+          else
+              OPEN_PATH="$HERE"
+          fi
+          exec "$HERE/code/bin/codium" \
+              --user-data-dir "$HERE/data/user" \
+              --extensions-dir "$HERE/data/extensions" \
+              "$OPEN_PATH" \
+              "$@"
+          EOF
+          chmod 0755 "$BUNDLE/start.sh"
+
+          cat > "$BUNDLE/README.txt" <<EOF
+          Megadrive Studio $VERSION — Linux x64 bundle
+          ============================================
+
+          Run:    ./start.sh
+          That's it. A private VSCodium with the Megadrive Studio
+          extensions opens; nothing is installed system-wide.
+
+          To open a project folder:    ./start.sh /path/to/project
+
+          Layout:
+            start.sh                      launcher
+            code/                         private VSCodium
+            data/extensions/              pre-installed extensions
+            data/user/                    isolated editor settings
+            bin/mds-mcp                   MCP server (on \$PATH inside)
+            bin/dump_vram                 headless VRAM dump
+            bin/clownmdemu_libretro.so    libretro core (AGPL)
+            bin/liblibra.a                static lib (MIT)
+            examples/rom.bin              sample ROM from this release
+            LICENSES/                     third-party license texts
+
+          Some Microsoft-only extensions in the pack are not on
+          OpenVSX (cpptools, claude-vscode); see LICENSES/README.txt
+          for alternatives.
+          EOF
+
+          # 7. Tar it up.
+          mkdir -p dist
+          tar -czf "dist/megadrive-studio-$VERSION-linux-x64.tar.gz" \
+            -C /tmp/mds-bundle megadrive-studio
+          ls -lh "dist/megadrive-studio-$VERSION-linux-x64.tar.gz"
+          du -sh "$BUNDLE"
+
       # ── Release notes ───────────────────────────────────────────────────────
       - name: Generate release notes
         run: |
@@ -202,6 +346,7 @@ jobs:
             dist/dump_vram-${{ steps.version.outputs.VERSION }}-linux-x64
             dist/clownmdemu_libretro-${{ steps.version.outputs.VERSION }}-linux-x64.so
             dist/liblibra-${{ steps.version.outputs.VERSION }}-linux-x64.a
+            dist/megadrive-studio-${{ steps.version.outputs.VERSION }}-linux-x64.tar.gz
             extensions/megadrive-studio-pack/*.vsix
             extensions/megadrive-studio/*.vsix
           fail_on_unmatched_files: false
