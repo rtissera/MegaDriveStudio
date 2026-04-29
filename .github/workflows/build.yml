@@ -25,22 +25,24 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # SGDK via image Docker hldtux (SGDK 2.11)
+      # SGDK via image Docker zerasul (SGDK 2.0, amd64)
       - name: Build ROM (debug)
         run: |
           docker run --rm \
+            --entrypoint /bin/bash \
             -v "${{ github.workspace }}:/src" \
             -w /src \
-            hldtux/docker-sgdk:v2.11 \
-            bash -c "make -f \$GDK/makefile.gen EXTRA_CFLAGS='-g -gdwarf-4 -O0' EXTRA_DEF='-DDEBUG'"
+            zerasul/sgdk:2.00 \
+            -c "make -f \$GDK/makefile.gen EXTRA_CFLAGS='-g -gdwarf-4 -O0' EXTRA_DEF='-DDEBUG'"
 
       - name: Build ROM (release)
         run: |
           docker run --rm \
+            --entrypoint /bin/bash \
             -v "${{ github.workspace }}:/src" \
             -w /src \
-            hldtux/docker-sgdk:v2.11 \
-            bash -c "make -f \$GDK/makefile.gen clean && make -f \$GDK/makefile.gen EXTRA_CFLAGS='-O2'"
+            zerasul/sgdk:2.00 \
+            -c "make -f \$GDK/makefile.gen clean && make -f \$GDK/makefile.gen EXTRA_CFLAGS='-O2'"
           # Rename release ROM
           cp out/rom.bin out/rom-release.bin
 
