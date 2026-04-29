@@ -38,62 +38,249 @@
     "onCommand:megadriveStudio.open68kMemory",
     "onCommand:megadriveStudio.stepInstruction",
     "onCommand:megadriveStudio.continue",
-    "onCommand:megadriveStudio.clearAllBreakpoints"
+    "onCommand:megadriveStudio.clearAllBreakpoints",
+    "onCommand:megadriveStudio.loadRom",
+    "onCommand:megadriveStudio.unloadRom"
   ],
   "contributes": {
     "commands": [
-      { "command": "megadriveStudio.buildDebug",          "title": "MD: Build Debug ROM" },
-      { "command": "megadriveStudio.buildRelease",        "title": "MD: Build Release ROM" },
-      { "command": "megadriveStudio.runBlastEm",          "title": "MD: Run in BlastEm" },
-      { "command": "megadriveStudio.runClownMDEmu",       "title": "MD: Run in ClownMDEmu" },
-      { "command": "megadriveStudio.debugBlastEm",        "title": "MD: Debug with BlastEm + GDB" },
-      { "command": "megadriveStudio.uploadEDPro",         "title": "MD: Upload to Mega Everdrive Pro" },
-      { "command": "megadriveStudio.showRomInfo",         "title": "MD: Show ROM Header Info" },
-      { "command": "megadriveStudio.openPlaneViewer",     "title": "Sega: Open Plane Viewer" },
-      { "command": "megadriveStudio.open68kMemory",       "title": "Sega: Open 68k Memory" },
-      { "command": "megadriveStudio.stepInstruction",     "title": "Sega: Step Instruction" },
-      { "command": "megadriveStudio.continue",            "title": "Sega: Continue" },
-      { "command": "megadriveStudio.toggleBreakpoint",    "title": "Sega: Toggle Breakpoint at Cursor" },
-      { "command": "megadriveStudio.clearAllBreakpoints", "title": "Sega: Clear All Breakpoints" },
-      { "command": "megadriveStudio.copyRegHex",          "title": "Copy as $hex" },
-      { "command": "megadriveStudio.copyRegDec",          "title": "Copy as decimal" },
-      { "command": "megadriveStudio.deleteBreakpoint",    "title": "Delete Breakpoint" },
-      { "command": "megadriveStudio.disableBreakpoint",   "title": "Disable Breakpoint" },
-      { "command": "megadriveStudio.editBreakpointCondition", "title": "Edit Condition" }
+      {
+        "command": "megadriveStudio.buildDebug",
+        "title": "MD: Build Debug ROM"
+      },
+      {
+        "command": "megadriveStudio.buildRelease",
+        "title": "MD: Build Release ROM"
+      },
+      {
+        "command": "megadriveStudio.runBlastEm",
+        "title": "MD: Run in BlastEm"
+      },
+      {
+        "command": "megadriveStudio.runClownMDEmu",
+        "title": "MD: Run in ClownMDEmu"
+      },
+      {
+        "command": "megadriveStudio.debugBlastEm",
+        "title": "MD: Debug with BlastEm + GDB"
+      },
+      {
+        "command": "megadriveStudio.uploadEDPro",
+        "title": "MD: Upload to Mega Everdrive Pro"
+      },
+      {
+        "command": "megadriveStudio.showRomInfo",
+        "title": "MD: Show ROM Header Info"
+      },
+      {
+        "command": "megadriveStudio.openPlaneViewer",
+        "title": "Sega: Open Plane Viewer"
+      },
+      {
+        "command": "megadriveStudio.open68kMemory",
+        "title": "Sega: Open 68k Memory"
+      },
+      {
+        "command": "megadriveStudio.stepInstruction",
+        "title": "Sega: Step Instruction"
+      },
+      {
+        "command": "megadriveStudio.continue",
+        "title": "Sega: Continue"
+      },
+      {
+        "command": "megadriveStudio.toggleBreakpoint",
+        "title": "Sega: Toggle Breakpoint at Cursor"
+      },
+      {
+        "command": "megadriveStudio.clearAllBreakpoints",
+        "title": "Sega: Clear All Breakpoints"
+      },
+      {
+        "command": "megadriveStudio.copyRegHex",
+        "title": "Copy as $hex"
+      },
+      {
+        "command": "megadriveStudio.copyRegDec",
+        "title": "Copy as decimal"
+      },
+      {
+        "command": "megadriveStudio.deleteBreakpoint",
+        "title": "Delete Breakpoint"
+      },
+      {
+        "command": "megadriveStudio.disableBreakpoint",
+        "title": "Disable Breakpoint"
+      },
+      {
+        "command": "megadriveStudio.editBreakpointCondition",
+        "title": "Edit Condition"
+      },
+      {
+        "command": "megadriveStudio.loadRom",
+        "title": "Sega: Load ROM…"
+      },
+      {
+        "command": "megadriveStudio.unloadRom",
+        "title": "Sega: Unload ROM"
+      }
     ],
     "keybindings": [
-      { "command": "megadriveStudio.stepInstruction",     "key": "f11" },
-      { "command": "megadriveStudio.continue",            "key": "f5",        "when": "!inDebugMode" },
-      { "command": "megadriveStudio.toggleBreakpoint",    "key": "f9",        "when": "resourceExtname == .s || resourceExtname == .c" },
-      { "command": "megadriveStudio.clearAllBreakpoints", "key": "ctrl+shift+f9" }
+      {
+        "command": "megadriveStudio.stepInstruction",
+        "key": "f11"
+      },
+      {
+        "command": "megadriveStudio.continue",
+        "key": "f5",
+        "when": "!inDebugMode"
+      },
+      {
+        "command": "megadriveStudio.toggleBreakpoint",
+        "key": "f9",
+        "when": "resourceExtname == .s || resourceExtname == .c"
+      },
+      {
+        "command": "megadriveStudio.clearAllBreakpoints",
+        "key": "ctrl+shift+f9"
+      }
     ],
     "menus": {
       "commandPalette": [
-        { "command": "megadriveStudio.buildDebug",          "when": "workspaceFolderCount > 0" },
-        { "command": "megadriveStudio.buildRelease",        "when": "workspaceFolderCount > 0" },
-        { "command": "megadriveStudio.runBlastEm",          "when": "workspaceFolderCount > 0" },
-        { "command": "megadriveStudio.runClownMDEmu",       "when": "workspaceFolderCount > 0" },
-        { "command": "megadriveStudio.debugBlastEm",        "when": "workspaceFolderCount > 0" },
-        { "command": "megadriveStudio.uploadEDPro",         "when": "workspaceFolderCount > 0" },
-        { "command": "megadriveStudio.showRomInfo",         "when": "workspaceFolderCount > 0" },
-        { "command": "megadriveStudio.openPlaneViewer",     "when": "workspaceFolderCount > 0" },
-        { "command": "megadriveStudio.open68kMemory",       "when": "workspaceFolderCount > 0" },
-        { "command": "megadriveStudio.stepInstruction",     "when": "workspaceFolderCount > 0" },
-        { "command": "megadriveStudio.continue",            "when": "workspaceFolderCount > 0" },
-        { "command": "megadriveStudio.toggleBreakpoint",    "when": "workspaceFolderCount > 0" },
-        { "command": "megadriveStudio.clearAllBreakpoints", "when": "workspaceFolderCount > 0" },
-        { "command": "megadriveStudio.copyRegHex",          "when": "false" },
-        { "command": "megadriveStudio.copyRegDec",          "when": "false" },
-        { "command": "megadriveStudio.deleteBreakpoint",    "when": "false" },
-        { "command": "megadriveStudio.disableBreakpoint",   "when": "false" },
-        { "command": "megadriveStudio.editBreakpointCondition", "when": "false" }
+        {
+          "command": "megadriveStudio.buildDebug",
+          "when": "workspaceFolderCount > 0"
+        },
+        {
+          "command": "megadriveStudio.buildRelease",
+          "when": "workspaceFolderCount > 0"
+        },
+        {
+          "command": "megadriveStudio.runBlastEm",
+          "when": "workspaceFolderCount > 0"
+        },
+        {
+          "command": "megadriveStudio.runClownMDEmu",
+          "when": "workspaceFolderCount > 0"
+        },
+        {
+          "command": "megadriveStudio.debugBlastEm",
+          "when": "workspaceFolderCount > 0"
+        },
+        {
+          "command": "megadriveStudio.uploadEDPro",
+          "when": "workspaceFolderCount > 0"
+        },
+        {
+          "command": "megadriveStudio.showRomInfo",
+          "when": "workspaceFolderCount > 0"
+        },
+        {
+          "command": "megadriveStudio.openPlaneViewer",
+          "when": "workspaceFolderCount > 0"
+        },
+        {
+          "command": "megadriveStudio.open68kMemory",
+          "when": "workspaceFolderCount > 0"
+        },
+        {
+          "command": "megadriveStudio.stepInstruction",
+          "when": "workspaceFolderCount > 0"
+        },
+        {
+          "command": "megadriveStudio.continue",
+          "when": "workspaceFolderCount > 0"
+        },
+        {
+          "command": "megadriveStudio.toggleBreakpoint",
+          "when": "workspaceFolderCount > 0"
+        },
+        {
+          "command": "megadriveStudio.clearAllBreakpoints",
+          "when": "workspaceFolderCount > 0"
+        },
+        {
+          "command": "megadriveStudio.copyRegHex",
+          "when": "false"
+        },
+        {
+          "command": "megadriveStudio.copyRegDec",
+          "when": "false"
+        },
+        {
+          "command": "megadriveStudio.deleteBreakpoint",
+          "when": "false"
+        },
+        {
+          "command": "megadriveStudio.disableBreakpoint",
+          "when": "false"
+        },
+        {
+          "command": "megadriveStudio.editBreakpointCondition",
+          "when": "false"
+        },
+        {
+          "command": "megadriveStudio.loadRom",
+          "when": "workspaceFolderCount > 0"
+        },
+        {
+          "command": "megadriveStudio.unloadRom",
+          "when": "workspaceFolderCount > 0"
+        }
       ],
       "view/item/context": [
-        { "command": "megadriveStudio.copyRegHex", "when": "viewItem == mdRegister", "group": "1_copy@1" },
-        { "command": "megadriveStudio.copyRegDec", "when": "viewItem == mdRegister", "group": "1_copy@2" },
-        { "command": "megadriveStudio.disableBreakpoint",       "when": "viewItem == mdBreakpoint", "group": "1_bp@1" },
-        { "command": "megadriveStudio.deleteBreakpoint",        "when": "viewItem == mdBreakpoint", "group": "1_bp@2" },
-        { "command": "megadriveStudio.editBreakpointCondition", "when": "viewItem == mdBreakpoint", "group": "1_bp@3" }
+        {
+          "command": "megadriveStudio.copyRegHex",
+          "when": "viewItem == mdRegister",
+          "group": "1_copy@1"
+        },
+        {
+          "command": "megadriveStudio.copyRegDec",
+          "when": "viewItem == mdRegister",
+          "group": "1_copy@2"
+        },
+        {
+          "command": "megadriveStudio.disableBreakpoint",
+          "when": "viewItem == mdBreakpoint",
+          "group": "1_bp@1"
+        },
+        {
+          "command": "megadriveStudio.deleteBreakpoint",
+          "when": "viewItem == mdBreakpoint",
+          "group": "1_bp@2"
+        },
+        {
+          "command": "megadriveStudio.editBreakpointCondition",
+          "when": "viewItem == mdBreakpoint",
+          "group": "1_bp@3"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "megadriveStudio.loadRom",
+          "when": "view == megadriveStudio.vram",
+          "group": "navigation@1"
+        },
+        {
+          "command": "megadriveStudio.unloadRom",
+          "when": "view == megadriveStudio.vram",
+          "group": "navigation@2"
+        },
+        {
+          "command": "megadriveStudio.loadRom",
+          "when": "view == megadriveStudio.sprites",
+          "group": "navigation@1"
+        },
+        {
+          "command": "megadriveStudio.loadRom",
+          "when": "view == megadriveStudio.m68kRegs",
+          "group": "navigation@1"
+        },
+        {
+          "command": "megadriveStudio.loadRom",
+          "when": "view == megadriveStudio.breakpoints",
+          "group": "navigation@1"
+        }
       ]
     },
     "configuration": {
@@ -158,20 +345,47 @@
         }
       ],
       "megadrive-studio": [
-        { "id": "megadriveStudio.vram",        "type": "webview", "name": "VRAM" },
-        { "id": "megadriveStudio.cram",        "type": "webview", "name": "CRAM" },
-        { "id": "megadriveStudio.sprites",     "name": "Sprites" },
-        { "id": "megadriveStudio.vdpRegs",     "name": "VDP Registers" },
-        { "id": "megadriveStudio.m68kRegs",    "name": "68k Registers" },
-        { "id": "megadriveStudio.breakpoints", "name": "Breakpoints" },
-        { "id": "megadriveStudio.planes",      "name": "Plane Viewer" },
-        { "id": "megadriveStudio.memEdit",     "name": "68k Memory" }
+        {
+          "id": "megadriveStudio.vram",
+          "type": "webview",
+          "name": "VRAM"
+        },
+        {
+          "id": "megadriveStudio.cram",
+          "type": "webview",
+          "name": "CRAM"
+        },
+        {
+          "id": "megadriveStudio.sprites",
+          "name": "Sprites"
+        },
+        {
+          "id": "megadriveStudio.vdpRegs",
+          "name": "VDP Registers"
+        },
+        {
+          "id": "megadriveStudio.m68kRegs",
+          "name": "68k Registers"
+        },
+        {
+          "id": "megadriveStudio.breakpoints",
+          "name": "Breakpoints"
+        },
+        {
+          "id": "megadriveStudio.planes",
+          "name": "Plane Viewer"
+        },
+        {
+          "id": "megadriveStudio.memEdit",
+          "name": "68k Memory"
+        }
       ]
     }
   },
   "scripts": {
-    "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./",
+    "compile": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --target=node18 --minify",
+    "typecheck": "tsc -p ./ --noEmit",
+    "watch": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --target=node18 --watch",
     "package": "vsce package",
     "vscode:prepublish": "npm run compile"
   },
@@ -179,9 +393,10 @@
     "@modelcontextprotocol/sdk": "1.29.0"
   },
   "devDependencies": {
-    "@types/vscode": "^1.85.0",
     "@types/node": "^20.0.0",
-    "typescript": "^5.4.0",
-    "@vscode/vsce": "latest"
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "latest",
+    "esbuild": "^0.28.0",
+    "typescript": "^5.4.0"
   }
 }
