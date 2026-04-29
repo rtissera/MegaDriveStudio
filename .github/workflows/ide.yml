@@ -1,0 +1,250 @@
+# =============================================================================
+# .github/workflows/ide.yml
+# Validate IDE artifacts: .vscode configs, shell scripts, Dockerfile,
+# extension pack, and native TypeScript extension.
+# =============================================================================
+name: IDE Artifacts
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '.vscode/**'
+      - 'extensions/**'
+      - 'setup.sh'
+      - 'docker/Dockerfile'
+      - '.github/workflows/ide.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - '.vscode/**'
+      - 'extensions/**'
+      - 'setup.sh'
+      - 'docker/Dockerfile'
+      - '.github/workflows/ide.yml'
+
+jobs:
+  # ── Validate .vscode/*.json (jsonc) ─────────────────────────────────────────
+  vscode-config:
+    name: Validate .vscode JSONC
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install jsonc-parser + jq
+        run: |
+          npm init -y >/dev/null 2>&1 || true
+          npm install --no-save jsonc-parser
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends jq
+
+      - name: Parse .vscode/*.json with jsonc-parser
+        run: |
+          shopt -s nullglob
+          files=(.vscode/*.json)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No .vscode/*.json files to validate"
+            exit 0
+          fi
+          node -e '
+            const { parse, printParseErrorCode } = require("jsonc-parser");
+            const fs = require("fs");
+            const files = process.argv.slice(1);
+            let failed = false;
+            for (const f of files) {
+              const text = fs.readFileSync(f, "utf8");
+              const errors = [];
+              const result = parse(text, errors, { allowTrailingComma: true });
+              if (errors.length > 0) {
+                failed = true;
+                console.error(`::error file=${f}::JSONC parse errors:`);
+                for (const e of errors) {
+                  console.error(`  ${f}: ${printParseErrorCode(e.error)} at offset ${e.offset}`);
+                }
+              } else {
+                console.log(`OK  ${f}`);
+              }
+            }
+            if (failed) process.exit(1);
+          ' "${files[@]}"
+
+      - name: Strip comments and validate with jq
+        run: |
+          shopt -s nullglob
+          files=(.vscode/*.json)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No .vscode/*.json files to validate"
+            exit 0
+          fi
+          fail=0
+          for f in "${files[@]}"; do
+            stripped=$(node -e '
+              const { stripComments } = require("jsonc-parser");
+              const fs = require("fs");
+              process.stdout.write(stripComments(fs.readFileSync(process.argv[1], "utf8")));
+            ' "$f")
+            if echo "$stripped" | jq empty >/dev/null 2>&1; then
+              echo "OK  $f"
+            else
+              echo "::error file=$f::jq failed on stripped JSON"
+              fail=1
+            fi
+          done
+          exit $fail
+
+  # ── ShellCheck ──────────────────────────────────────────────────────────────
+  shellcheck:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends shellcheck
+
+      - name: Run shellcheck
+        run: |
+          shopt -s nullglob
+          targets=()
+          [ -f setup.sh ] && targets+=(setup.sh)
+          for s in scripts/*.sh; do
+            targets+=("$s")
+          done
+          if [ ${#targets[@]} -eq 0 ]; then
+            echo "No shell scripts to lint"
+            exit 0
+          fi
+          # Allow warnings (severity=error fails only on errors)
+          shellcheck --severity=error "${targets[@]}"
+
+  # ── Hadolint Dockerfile ─────────────────────────────────────────────────────
+  hadolint:
+    name: Hadolint Dockerfile
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Hadolint
+        if: hashFiles('docker/Dockerfile') != ''
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: docker/Dockerfile
+          # Allow warnings: only fail on errors
+          failure-threshold: error
+          no-fail: false
+
+  # ── Extension pack (manifest only) ──────────────────────────────────────────
+  extension-pack:
+    name: Extension Pack (vsix)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Skip notice
+        if: hashFiles('extensions/megadrive-studio-pack/package.json') == ''
+        run: echo "extensions/megadrive-studio-pack/ not present yet — skipping."
+
+      - name: Setup Node 20
+        if: hashFiles('extensions/megadrive-studio-pack/package.json') != ''
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Package extension pack (vsce)
+        if: hashFiles('extensions/megadrive-studio-pack/package.json') != ''
+        working-directory: extensions/megadrive-studio-pack
+        run: npx -y @vscode/vsce@latest package --no-dependencies --allow-missing-repository
+
+      - name: Upload .vsix artifact
+        if: hashFiles('extensions/megadrive-studio-pack/package.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: megadrive-studio-pack-vsix
+          path: extensions/megadrive-studio-pack/*.vsix
+          retention-days: 30
+          if-no-files-found: error
+
+  # ── Native TypeScript extension ─────────────────────────────────────────────
+  extension-native:
+    name: Extension Native (build + vsix)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Skip notice
+        if: hashFiles('extensions/megadrive-studio/package.json') == ''
+        run: echo "extensions/megadrive-studio/ not present yet — skipping."
+
+      - name: Setup Node 20
+        if: hashFiles('extensions/megadrive-studio/package.json') != ''
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: extensions/megadrive-studio/package-lock.json
+
+      - name: Install dependencies
+        if: hashFiles('extensions/megadrive-studio/package.json') != ''
+        working-directory: extensions/megadrive-studio
+        run: npm ci || npm install
+
+      - name: Compile TypeScript
+        if: hashFiles('extensions/megadrive-studio/package.json') != ''
+        working-directory: extensions/megadrive-studio
+        run: npm run compile
+
+      - name: Package extension (vsce)
+        if: hashFiles('extensions/megadrive-studio/package.json') != ''
+        working-directory: extensions/megadrive-studio
+        run: npx -y @vscode/vsce@latest package --no-dependencies --allow-missing-repository
+
+      - name: Upload .vsix artifact
+        if: hashFiles('extensions/megadrive-studio/package.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: megadrive-studio-vsix
+          path: extensions/megadrive-studio/*.vsix
+          retention-days: 30
+          if-no-files-found: error
+
+  # ── setup.sh dry-run (best effort) ──────────────────────────────────────────
+  setup-sh-dryrun:
+    name: setup.sh dry-run (ubuntu:24.04)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    container:
+      image: ubuntu:24.04
+
+    steps:
+      - name: Install minimal tooling
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends sudo bash ca-certificates git
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Bash syntax check (bash -n)
+        run: |
+          if [ -f setup.sh ]; then
+            bash -n setup.sh && echo "setup.sh: syntax OK"
+          else
+            echo "setup.sh not found — skipping"
+          fi

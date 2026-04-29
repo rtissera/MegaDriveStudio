@@ -2,7 +2,7 @@
 # .github/workflows/build.yml
 # CI : build ROM + smoke test BlastEm + upload artefact
 # =============================================================================
-name: Build ROM
+name: Build
 
 on:
   push:

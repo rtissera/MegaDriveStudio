@@ -46,6 +46,25 @@ jobs:
           # Rename avec version
           cp out/rom.bin "out/rom-${{ steps.version.outputs.VERSION }}.bin"
 
+      - name: Setup Node 20 (for vsce)
+        if: hashFiles('extensions/megadrive-studio-pack/package.json', 'extensions/megadrive-studio/package.json') != ''
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build extension pack .vsix
+        if: hashFiles('extensions/megadrive-studio-pack/package.json') != ''
+        working-directory: extensions/megadrive-studio-pack
+        run: npx -y @vscode/vsce@latest package --no-dependencies --allow-missing-repository
+
+      - name: Build native extension .vsix
+        if: hashFiles('extensions/megadrive-studio/package.json') != ''
+        working-directory: extensions/megadrive-studio
+        run: |
+          npm ci || npm install
+          npm run compile
+          npx -y @vscode/vsce@latest package --no-dependencies --allow-missing-repository
+
       - name: Generate ROM info
         run: |
           SIZE=$(stat -c%s "out/rom-${{ steps.version.outputs.VERSION }}.bin")
@@ -68,5 +87,8 @@ jobs:
           prerelease: ${{ contains(steps.version.outputs.VERSION, '-') }}
           files: |
             out/rom-${{ steps.version.outputs.VERSION }}.bin
+            extensions/megadrive-studio-pack/*.vsix
+            extensions/megadrive-studio/*.vsix
+          fail_on_unmatched_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

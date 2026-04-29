@@ -26,3 +26,8 @@ __pycache__/
 # OS
 .DS_Store
 Thumbs.db
+
+# VS Code extension build artifacts
+extensions/**/node_modules/
+extensions/**/dist/
+extensions/**/*.vsix

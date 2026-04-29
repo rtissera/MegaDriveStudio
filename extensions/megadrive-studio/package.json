@@ -1,0 +1,111 @@
+{
+  "name": "megadrive-studio",
+  "displayName": "Megadrive Studio",
+  "description": "Sega Mega Drive / Genesis homebrew dev IDE for VS Code (SGDK + BlastEm + ClownMDEmu + Mega Everdrive Pro).",
+  "version": "0.1.0",
+  "publisher": "megadrive-studio",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "main": "./dist/extension.js",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/megadrive-studio/megadrive-studio.git"
+  },
+  "categories": [
+    "Other",
+    "Debuggers"
+  ],
+  "keywords": [
+    "sega",
+    "megadrive",
+    "genesis",
+    "sgdk",
+    "68000"
+  ],
+  "activationEvents": [
+    "workspaceContains:Makefile"
+  ],
+  "contributes": {
+    "commands": [
+      { "command": "megadriveStudio.buildDebug",   "title": "MD: Build Debug ROM" },
+      { "command": "megadriveStudio.buildRelease", "title": "MD: Build Release ROM" },
+      { "command": "megadriveStudio.runBlastEm",   "title": "MD: Run in BlastEm" },
+      { "command": "megadriveStudio.runClownMDEmu","title": "MD: Run in ClownMDEmu" },
+      { "command": "megadriveStudio.debugBlastEm", "title": "MD: Debug with BlastEm + GDB" },
+      { "command": "megadriveStudio.uploadEDPro",  "title": "MD: Upload to Mega Everdrive Pro" },
+      { "command": "megadriveStudio.showRomInfo",  "title": "MD: Show ROM Header Info" }
+    ],
+    "menus": {
+      "commandPalette": [
+        { "command": "megadriveStudio.buildDebug",    "when": "workspaceFolderCount > 0" },
+        { "command": "megadriveStudio.buildRelease",  "when": "workspaceFolderCount > 0" },
+        { "command": "megadriveStudio.runBlastEm",    "when": "workspaceFolderCount > 0" },
+        { "command": "megadriveStudio.runClownMDEmu", "when": "workspaceFolderCount > 0" },
+        { "command": "megadriveStudio.debugBlastEm",  "when": "workspaceFolderCount > 0" },
+        { "command": "megadriveStudio.uploadEDPro",   "when": "workspaceFolderCount > 0" },
+        { "command": "megadriveStudio.showRomInfo",   "when": "workspaceFolderCount > 0" }
+      ]
+    },
+    "configuration": {
+      "title": "Megadrive Studio",
+      "properties": {
+        "megadriveStudio.gdkPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to SGDK installation (e.g. /opt/sgdk). Overrides the GDK environment variable."
+        },
+        "megadriveStudio.marsdevPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to MARSDEV toolchain (e.g. /opt/marsdev). Overrides MARSDEV env."
+        },
+        "megadriveStudio.blastemPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to BlastEm binary (e.g. /opt/blastem/blastem)."
+        },
+        "megadriveStudio.clownmdemuPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to ClownMDEmu frontend binary."
+        },
+        "megadriveStudio.edproPort": {
+          "type": "string",
+          "default": "",
+          "description": "USB serial port for Mega Everdrive Pro (e.g. /dev/ttyACM0)."
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "megadrive-studio",
+          "title": "Mega Drive",
+          "icon": "$(rocket)"
+        }
+      ]
+    },
+    "views": {
+      "explorer": [
+        {
+          "id": "megadriveStudio.romInfo",
+          "name": "Mega Drive ROM"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package",
+    "vscode:prepublish": "npm run compile"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.4.0",
+    "@vscode/vsce": "latest"
+  }
+}
