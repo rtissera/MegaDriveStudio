@@ -4,7 +4,13 @@
 //! When the libra header is missing at build time, `build.rs` writes a stub
 //! `bindings.rs` containing only comments. That keeps `cargo check` green so
 //! contributors can iterate on the Rust side before submodules are populated.
-//! The actual link will fail later, which is expected during the M1 scaffold.
+//! The actual link will fail later, which is expected during scaffold.
+//!
+//! M2 also defines the custom `LIBRA_MEMORY_*` IDs used for clownmdemu's
+//! Mega-Drive-specific memory regions. These constants are stable and live
+//! here as a fallback in case the patched libretro core fork isn't built yet
+//! (the parallel agent is still finishing it). Once the core exposes them via
+//! `retro_get_memory_data`, the IDs match.
 
 #![allow(non_upper_case_globals)]
 #![allow(non_camel_case_types)]
@@ -12,3 +18,23 @@
 #![allow(dead_code)]
 
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
+
+/// libretro standard memory IDs (mirrored here in case bindgen didn't catch
+/// them through the libretro_internal headers). These are `pub use`d only
+/// when the bindings file does not already define them.
+#[cfg(not(libra_present))]
+pub const RETRO_MEMORY_SAVE_RAM: u32 = 0;
+#[cfg(not(libra_present))]
+pub const RETRO_MEMORY_RTC: u32 = 1;
+#[cfg(not(libra_present))]
+pub const RETRO_MEMORY_SYSTEM_RAM: u32 = 2;
+#[cfg(not(libra_present))]
+pub const RETRO_MEMORY_VIDEO_RAM: u32 = 3;
+
+/// Mega-Drive-specific custom memory IDs added to the clownmdemu libretro
+/// fork. Stable values agreed with the core-fork agent.
+pub const LIBRA_MEMORY_CRAM: u32 = 0x100;
+pub const LIBRA_MEMORY_VSRAM: u32 = 0x101;
+pub const LIBRA_MEMORY_VDP_STATE: u32 = 0x102;
+pub const LIBRA_MEMORY_M68K: u32 = 0x103;
+pub const LIBRA_MEMORY_Z80: u32 = 0x104;

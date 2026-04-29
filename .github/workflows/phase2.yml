@@ -131,26 +131,45 @@ jobs:
 
       - name: cargo clippy
         working-directory: mds-mcp
-        run: cargo clippy --release -- -D warnings || true
+        run: cargo clippy --release --all-targets -- -D warnings
 
       - name: cargo build --release
         working-directory: mds-mcp
         run: cargo build --release
 
-      - name: MCP smoke test (initialize + tools/list)
+      - name: cargo test --release (integration smoke)
+        working-directory: mds-mcp
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: cargo test --release -- --nocapture
+
+      - name: MCP smoke test (initialize + tools/list + resources/list)
         working-directory: mds-mcp
         run: |
-          # Send initialize then tools/list, expect both to return valid JSON-RPC.
+          # Drive a real MCP client sequence over stdio. Asserts on both the
+          # tool catalogue (≥19) and the resource catalogue (=7).
           (
             echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"0.0.0"}}}'
             echo '{"jsonrpc":"2.0","method":"notifications/initialized"}'
             echo '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+            echo '{"jsonrpc":"2.0","id":3,"method":"resources/list"}'
           ) | timeout 5 ./target/release/mds-mcp 2>/dev/null | tee /tmp/mcp-out.txt
           grep -q '"name":"mds-mcp"' /tmp/mcp-out.txt
-          grep -q '"mega_load_rom"' /tmp/mcp-out.txt
-          grep -q '"mega_pause"' /tmp/mcp-out.txt
-          grep -q '"mega_read_memory"' /tmp/mcp-out.txt
-          echo "MCP smoke OK"
+          for tool in mega_load_rom mega_unload_rom mega_pause mega_resume \
+                      mega_step_frame mega_step_instruction \
+                      mega_read_memory mega_write_memory \
+                      mega_get_vdp_registers mega_get_palettes mega_get_sprites \
+                      mega_dump_tile mega_get_68k_registers mega_get_z80_registers \
+                      mega_set_breakpoint mega_clear_breakpoint mega_continue \
+                      mega_screenshot mega_save_state mega_load_state mega_get_status; do
+            grep -q "\"$tool\"" /tmp/mcp-out.txt || { echo "missing tool: $tool"; exit 1; }
+          done
+          for uri in "mega://vram" "mega://cram" "mega://vsram" \
+                     "mega://vdp/registers" "mega://sprites" \
+                     "mega://m68k/registers" "mega://framebuffer"; do
+            grep -q "\"$uri\"" /tmp/mcp-out.txt || { echo "missing resource: $uri"; exit 1; }
+          done
+          echo "MCP smoke OK (tools + resources)"
 
       - name: Upload mds-mcp binary
         uses: actions/upload-artifact@v4

@@ -1,17 +1,40 @@
 // SPDX-License-Identifier: MIT
 //! Build script: generates Rust FFI bindings for libra (../vendor/libra).
 //!
-//! If `../vendor/libra/include/libra.h` is missing (the parallel agent has not
-//! initialised submodules yet), we emit a `cargo:warning` and fall back to a
-//! stub `bindings.rs` so that `cargo check` / `cargo build` succeed for
-//! downstream tooling. Linking will then fail at the actual link stage with a
-//! clear message — that's fine, M1 is a scaffold.
+//! When the libra header / library aren't yet available (the parallel agent
+//! hasn't finished), we still emit a *complete* but synthetic stub
+//! `bindings.rs` so the rest of the crate compiles. We expose the cfg
+//! `libra_present` only when bindgen produced real bindings; downstream
+//! modules use `#[cfg(libra_present)]` to switch between live FFI and the
+//! safe-no-op fallback.
 
 use std::env;
 use std::fs;
 use std::path::PathBuf;
 
+const STUB_BINDINGS: &str = r#"// SPDX-License-Identifier: MIT
+// Stub bindings — libra header was not present at build time.
+// Run `git submodule update --init --recursive` then rebuild.
+
+#![allow(dead_code)]
+
+/// Opaque libra context type (stub).
+#[repr(C)]
+pub struct libra_ctx {
+    _private: [u8; 0],
+}
+
+/// Stub of `libra_config_t`. Exists so the rest of the crate type-checks.
+#[repr(C)]
+#[derive(Default)]
+pub struct libra_config_t {
+    pub _opaque: [usize; 32],
+}
+"#;
+
 fn main() {
+    println!("cargo::rustc-check-cfg=cfg(libra_present)");
+
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let header = manifest_dir.join("../vendor/libra/include/libra.h");
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
@@ -22,19 +45,15 @@ fn main() {
 
     if !header.exists() {
         println!(
-            "cargo:warning=libra header not found at {}. Run `git submodule update --init --recursive` from the repo root. Writing stub bindings; linking will fail later (expected during scaffold).",
+            "cargo:warning=libra header not found at {}. Writing stub bindings; libra-backed features will be no-ops.",
             header.display()
         );
-        let stub = "// SPDX-License-Identifier: MIT\n// Stub bindings — libra header was missing at build time.\n// Run `git submodule update --init --recursive` then rebuild.\n";
-        fs::write(&bindings_out, stub).expect("write stub bindings");
+        fs::write(&bindings_out, STUB_BINDINGS).expect("write stub bindings");
         return;
     }
 
     let include_dir = manifest_dir.join("../vendor/libra/include");
     let src_dir = manifest_dir.join("../vendor/libra/src");
-    // libra.h transitively includes libra_internal.h, which #include "libretro.h".
-    // The vendored libretro header lives in vendor/libra/deps. Without this
-    // include path, bindgen falls back to stubs.
     let deps_dir = manifest_dir.join("../vendor/libra/deps");
 
     let builder = bindgen::Builder::default()
@@ -54,15 +73,9 @@ fn main() {
         Ok(b) => b,
         Err(e) => {
             println!(
-                "cargo:warning=bindgen failed against libra header: {e}. Writing stub bindings; the parallel libra agent may not have populated all transitive headers yet. Linking will fail later (expected)."
+                "cargo:warning=bindgen failed: {e}. Writing stub bindings; libra-backed features will be no-ops."
             );
-            let stub = format!(
-                "// SPDX-License-Identifier: MIT\n// Stub bindings — bindgen failed: {e}\n"
-            );
-            fs::write(&bindings_out, stub).expect("write stub bindings");
-            // Still emit link search hints in case the C lib happens to be present.
-            let lib_dir = manifest_dir.join("../vendor/libra/build");
-            println!("cargo:rustc-link-search=native={}", lib_dir.display());
+            fs::write(&bindings_out, STUB_BINDINGS).expect("write stub bindings");
             return;
         }
     };
@@ -71,13 +84,14 @@ fn main() {
         .write_to_file(&bindings_out)
         .expect("failed to write bindings.rs");
 
-    // Tell rustc where to find the static/shared lib produced by libra's CMake.
+    // Successful bindgen — switch on libra_present and link.
+    println!("cargo:rustc-cfg=libra_present");
+
     let lib_dir = manifest_dir.join("../vendor/libra/build");
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
     let lib_dir_release = manifest_dir.join("../vendor/libra/build_release");
     println!("cargo:rustc-link-search=native={}", lib_dir_release.display());
 
-    // Allow override via env var (LIBRA_LIB_NAME=libra_static, etc).
     let lib_name = env::var("LIBRA_LIB_NAME").unwrap_or_else(|_| "libra".to_string());
-    println!("cargo:rustc-link-lib={}", lib_name);
+    println!("cargo:rustc-link-lib={lib_name}");
 }

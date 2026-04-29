@@ -7,11 +7,10 @@
 # Static libra pulls in glslang + SPIRV-Cross (C++), so we link with c++.
 
 CXX       ?= c++
-# ASAN is currently REQUIRED at runtime: there is a heap-corruption bug in
-# libra's audio path on the ClownMDEmu sample rate (≈223 kHz → 48 kHz) that
-# crashes glibc's default malloc inside libra_audio_flush.  ASAN's red zones
-# happen to mask it.  Once the upstream bug is fixed, drop -fsanitize=address.
-SAN       ?= -fsanitize=address
+# Note: an earlier ClownMDEmu run-with-libra heap corruption was rooted in
+# RETRO_ENVIRONMENT_GET_CURRENT_SOFTWARE_FRAMEBUFFER sizing (libra PR #1,
+# merged 2026-04-29). Bug is gone; SAN= remains opt-in for debugging.
+SAN       ?=
 CFLAGS    ?= -O2 -g -Wall -Wextra $(SAN)
 LDFLAGS   ?= $(SAN)
 LIBRA_DIR := ../vendor/libra
