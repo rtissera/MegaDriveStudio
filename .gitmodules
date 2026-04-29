@@ -1,0 +1,6 @@
+[submodule "vendor/libra"]
+	path = vendor/libra
+	url = https://github.com/rtissera/libra
+[submodule "vendor/clownmdemu-libretro"]
+	path = vendor/clownmdemu-libretro
+	url = https://github.com/Clownacy/clownmdemu-libretro

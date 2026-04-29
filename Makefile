@@ -114,3 +114,25 @@ rebuild-clown:
 rebuild-sgdk:
 	@echo "[rebuild] SGDK lib"
 	@make -f $(GDK)/makelib.gen GDK=$(GDK) MARSDEV=$(MARSDEV)
+
+# ── Phase 2 / M0 spike : libra + clownmdemu-libretro vendored deps ───────────
+.PHONY: vendor-build m0-spike
+
+vendor-build:
+	@echo "[vendor] init submodules"
+	git submodule update --init --recursive
+	@echo "[vendor] build clownmdemu-libretro core"
+	$(MAKE) -C vendor/clownmdemu-libretro -j$$(nproc)
+	@echo "[vendor] configure + build libra (static)"
+	cmake -S vendor/libra -B vendor/libra/build \
+	      -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTS=OFF
+	cmake --build vendor/libra/build -j$$(nproc)
+
+m0-spike:
+	@echo "[m0] build dump_vram + run 600-frame headless smoke test"
+	$(MAKE) -C tools
+	@if [ ! -f $(ROM) ]; then \
+	  echo "[m0] $(ROM) absent — run 'make debug' first"; exit 1; fi
+	cd tools && ASAN_OPTIONS=detect_leaks=0:abort_on_error=0 \
+	  ./dump_vram ../$(ROM) ../vram.bin
+	@echo "[m0] vram.bin head:" && xxd vram.bin | head -8

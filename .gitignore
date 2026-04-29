@@ -31,3 +31,14 @@ Thumbs.db
 extensions/**/node_modules/
 extensions/**/dist/
 extensions/**/*.vsix
+
+# Vendored deps build outputs
+vendor/*/build/
+vendor/*/build_release/
+vendor/clownmdemu-libretro/*.so
+vendor/clownmdemu-libretro/*.o
+
+# M0 spike host tools
+tools/dump_vram
+tools/*.o
+vram*.bin

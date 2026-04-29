@@ -1,0 +1,202 @@
+# =============================================================================
+# .github/workflows/phase2.yml
+# Phase 2 spike: vendored libra + clownmdemu-libretro + Rust MCP server.
+# =============================================================================
+name: Phase 2 (libra + mds-mcp)
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'vendor/**'
+      - 'tools/**'
+      - 'mds-mcp/**'
+      - '.gitmodules'
+      - '.github/workflows/phase2.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'vendor/**'
+      - 'tools/**'
+      - 'mds-mcp/**'
+      - '.gitmodules'
+      - '.github/workflows/phase2.yml'
+
+jobs:
+  vendor-build:
+    name: Build vendored libra + clownmdemu-libretro
+    runs-on: ubuntu-latest
+    outputs:
+      core_sha: ${{ steps.shas.outputs.core_sha }}
+      libra_sha: ${{ steps.shas.outputs.libra_sha }}
+
+    steps:
+      - name: Checkout (recursive)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Submodule SHAs
+        id: shas
+        run: |
+          echo "libra_sha=$(git -C vendor/libra rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "core_sha=$(git -C vendor/clownmdemu-libretro rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build pkg-config
+
+      - name: Build clownmdemu_libretro.so
+        working-directory: vendor/clownmdemu-libretro
+        run: make -j"$(nproc)"
+
+      - name: Configure libra (static)
+        run: |
+          cmake -S vendor/libra -B vendor/libra/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DBUILD_TESTS=OFF \
+            -G Ninja
+
+      - name: Build libra
+        run: cmake --build vendor/libra/build -j"$(nproc)"
+
+      - name: Verify outputs
+        run: |
+          test -f vendor/libra/build/liblibra.a
+          test -f vendor/clownmdemu-libretro/clownmdemu_libretro.so
+          ls -lh vendor/libra/build/liblibra.a \
+                 vendor/clownmdemu-libretro/clownmdemu_libretro.so
+
+      - name: Upload vendor artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: vendor-build
+          path: |
+            vendor/libra/build/liblibra.a
+            vendor/libra/build/deps/**/*.a
+            vendor/clownmdemu-libretro/clownmdemu_libretro.so
+          retention-days: 7
+
+  mds-mcp:
+    name: Build mds-mcp (Rust)
+    runs-on: ubuntu-latest
+    needs: vendor-build
+
+    steps:
+      - name: Checkout (recursive)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Install build deps (clang for bindgen, cmake for libra)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build pkg-config \
+            clang libclang-dev
+
+      - name: Setup Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            mds-mcp/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('mds-mcp/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: Build libra (mds-mcp links against it)
+        run: |
+          cmake -S vendor/libra -B vendor/libra/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DBUILD_TESTS=OFF \
+            -G Ninja
+          cmake --build vendor/libra/build -j"$(nproc)"
+
+      - name: cargo check
+        working-directory: mds-mcp
+        run: cargo check --release
+
+      - name: cargo clippy
+        working-directory: mds-mcp
+        run: cargo clippy --release -- -D warnings || true
+
+      - name: cargo build --release
+        working-directory: mds-mcp
+        run: cargo build --release
+
+      - name: MCP smoke test (initialize + tools/list)
+        working-directory: mds-mcp
+        run: |
+          # Send initialize then tools/list, expect both to return valid JSON-RPC.
+          (
+            echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"0.0.0"}}}'
+            echo '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+            echo '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+          ) | timeout 5 ./target/release/mds-mcp 2>/dev/null | tee /tmp/mcp-out.txt
+          grep -q '"name":"mds-mcp"' /tmp/mcp-out.txt
+          grep -q '"mega_load_rom"' /tmp/mcp-out.txt
+          grep -q '"mega_pause"' /tmp/mcp-out.txt
+          grep -q '"mega_read_memory"' /tmp/mcp-out.txt
+          echo "MCP smoke OK"
+
+      - name: Upload mds-mcp binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: mds-mcp-linux-x64
+          path: mds-mcp/target/release/mds-mcp
+          retention-days: 30
+
+  tools-build:
+    name: Build tools/dump_vram
+    runs-on: ubuntu-latest
+    needs: vendor-build
+
+    steps:
+      - name: Checkout (recursive)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build pkg-config
+
+      - name: Build libra (static, tests off)
+        run: |
+          cmake -S vendor/libra -B vendor/libra/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DBUILD_TESTS=OFF \
+            -G Ninja
+          cmake --build vendor/libra/build -j"$(nproc)"
+
+      - name: Build clownmdemu_libretro.so
+        working-directory: vendor/clownmdemu-libretro
+        run: make -j"$(nproc)"
+
+      - name: Compile dump_vram
+        working-directory: tools
+        run: make
+
+      - name: Upload dump_vram
+        uses: actions/upload-artifact@v4
+        with:
+          name: dump_vram-linux-x64
+          path: tools/dump_vram
+          retention-days: 7
