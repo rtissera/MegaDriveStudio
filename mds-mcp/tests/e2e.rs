@@ -35,7 +35,16 @@ async fn cumulative_real_rom() {
         "sample ROM missing at {path}; build it via `make` first or set MDS_E2E_ROM",
     );
 
-    let mut c = McpClient::spawn();
+    // CI builds the core at vendor/clownmdemu-libretro/clownmdemu_libretro.so
+    // (repo root). When tests run from mds-mcp/, the relative path is
+    // ../vendor/... — let the user override via MDS_MCP_CORE.
+    let core = std::env::var("MDS_MCP_CORE")
+        .unwrap_or_else(|_| "../vendor/clownmdemu-libretro/clownmdemu_libretro.so".to_string());
+    assert!(
+        std::path::Path::new(&core).exists(),
+        "libretro core missing at {core}; build it via `make` in vendor/clownmdemu-libretro",
+    );
+    let mut c = McpClient::spawn_with_args(&["--core", &core]);
     c.handshake("e2e").await;
 
     // 1. load_rom

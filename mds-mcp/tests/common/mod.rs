@@ -30,18 +30,33 @@ pub struct McpClient {
 
 impl McpClient {
     pub fn spawn() -> Self {
+        Self::spawn_with_args(&[])
+    }
+
+    /// Spawn `mds-mcp` with extra command-line arguments (e.g. `--core path`).
+    /// The binary is looked up via `resolved_binary()`; stderr is silenced
+    /// unless the env var `MDS_MCP_TEST_STDERR=1` is set (helpful for
+    /// debugging an integration test locally).
+    pub fn spawn_with_args(extra: &[&str]) -> Self {
         let bin = resolved_binary();
         assert!(
             std::path::Path::new(&bin).exists(),
             "binary not built at {bin} — run `cargo build --release` first",
         );
-        let mut child = Command::new(&bin)
-            .stdin(Stdio::piped())
+        let stderr_mode = if std::env::var("MDS_MCP_TEST_STDERR").is_ok() {
+            Stdio::inherit()
+        } else {
+            Stdio::null()
+        };
+        let mut cmd = Command::new(&bin);
+        cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .expect("spawn mds-mcp");
+            .stderr(stderr_mode)
+            .kill_on_drop(true);
+        for a in extra {
+            cmd.arg(a);
+        }
+        let mut child = cmd.spawn().expect("spawn mds-mcp");
         let stdin = child.stdin.take().expect("stdin");
         let stdout = child.stdout.take().expect("stdout");
         let reader = BufReader::new(stdout);
