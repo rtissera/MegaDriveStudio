@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 import * as vscode from "vscode";
 import * as fs from "fs";
+import * as net from "net";
 import * as path from "path";
 import { spawn, ChildProcess } from "child_process";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -17,7 +18,13 @@ export class McpBridge {
   private connectingPromise?: Promise<void>;
   public connected = false;
 
-  constructor(private readonly ctx: vscode.ExtensionContext) {}
+  private out?: vscode.OutputChannel;
+  constructor(private readonly ctx: vscode.ExtensionContext) {
+    // Reuse the extension's "Megadrive Studio" channel if it exists.
+    this.out = vscode.window.createOutputChannel("Megadrive Studio (MCP)");
+    ctx.subscriptions.push(this.out);
+  }
+  private log(s: string): void { this.out?.appendLine(`[mcp] ${s}`); }
 
   async connect(): Promise<void> {
     if (this.connected) return;
@@ -41,19 +48,60 @@ export class McpBridge {
     let useStdio = url.startsWith("stdio:");
     if (autoSpawn && !useStdio) {
       const port = parsePort(url) ?? 28765;
-      const bin = this.locateBinary();
-      if (!bin) {
-        vscode.window.showWarningMessage(
-          "mds-mcp binary not found. Set megadriveStudio.mdsMcpBinary or build mds-mcp/target/release/mds-mcp."
-        );
-        return;
+      // Probe first — if something already listens on the port, reuse it
+      // instead of spawning a duplicate that would die on EADDRINUSE.
+      const alive = await probePort("127.0.0.1", port, 400);
+      if (alive) {
+        this.log(`port ${port} already serving — reusing existing mds-mcp`);
+      } else {
+        const bin = this.locateBinary();
+        if (!bin) {
+          vscode.window.showWarningMessage(
+            "mds-mcp binary not found. Set megadriveStudio.mdsMcpBinary or build mds-mcp/target/release/mds-mcp."
+          );
+          return;
+        }
+        const args = ["--sse", String(port)];
+        // Resolve core path: explicit setting → MDS_CORE env (bundle) →
+        // <bundle>/bin/<so> next to the binary if it exists.
+        const cfg2 = vscode.workspace.getConfiguration("megadriveStudio");
+        const coreSetting = cfg2.get<string>("clownmdemuPath", "");
+        const coreEnv = process.env.MDS_CORE;
+        const binDir = path.dirname(bin);
+        const coreNext = path.join(binDir, "clownmdemu_libretro.so");
+        const corePath =
+          (coreSetting && fs.existsSync(coreSetting) && coreSetting) ||
+          (coreEnv && fs.existsSync(coreEnv) && coreEnv) ||
+          (fs.existsSync(coreNext) && coreNext) ||
+          "";
+        if (corePath) args.push("--core", corePath);
+        this.log(`spawn ${bin} ${args.join(" ")}`);
+        this.spawned = spawn(bin, args, {
+          stdio: ["ignore", "pipe", "pipe"],
+          cwd: binDir, // so any relative paths in mds-mcp resolve next to the binary
+        });
+        let stderrBuf = "";
+        this.spawned.stderr?.on("data", (b: Buffer) => {
+          stderrBuf += b.toString();
+          if (stderrBuf.length > 4096) stderrBuf = stderrBuf.slice(-4096);
+          this.log(`mds-mcp[stderr] ${b.toString().trim()}`);
+        });
+        this.spawned.on("exit", (code, sig) => {
+          this.log(`mds-mcp exited code=${code} sig=${sig}`);
+          this.connected = false;
+        });
+        this.spawned.on("error", (e) => {
+          this.log(`mds-mcp spawn error: ${e}`);
+          vscode.window.showErrorMessage(`Failed to start mds-mcp: ${e.message}`);
+        });
+        await new Promise<void>((res) => setTimeout(res, 800));
+        if (this.spawned.exitCode !== null) {
+          vscode.window.showErrorMessage(
+            `mds-mcp exited immediately (code=${this.spawned.exitCode}). stderr tail: ${stderrBuf.slice(-300)}`
+          );
+          return;
+        }
       }
-      this.spawned = spawn(bin, ["--sse", String(port)], {
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-      this.spawned.on("exit", () => { this.connected = false; });
-      // Wait briefly for the listener to bind.
-      await new Promise<void>((res) => setTimeout(res, 600));
     }
 
     if (useStdio) {
@@ -88,14 +136,24 @@ export class McpBridge {
 
   private locateBinary(): string | undefined {
     const cfg = vscode.workspace.getConfiguration("megadriveStudio");
-    const explicit = cfg.get<string>("mdsMcpBinary", "");
-    if (explicit && fs.existsSync(explicit)) return explicit;
     const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+
+    // 1. Explicit setting — resolve ${workspaceFolder} ourselves.
+    const raw = cfg.get<string>("mdsMcpBinary", "");
+    const explicit = raw && ws ? raw.replace(/\$\{workspaceFolder\}/g, ws) : raw;
+    if (explicit && fs.existsSync(explicit)) return explicit;
+
+    // 2. MDS_MCP env (set by bundle's start.sh).
+    const env = process.env.MDS_MCP;
+    if (env && fs.existsSync(env)) return env;
+
+    // 3. dev tree.
     if (ws) {
       const p = path.join(ws, "mds-mcp", "target", "release", "mds-mcp");
       if (fs.existsSync(p)) return p;
     }
-    // PATH lookup — just hand back "mds-mcp" and let spawn resolve.
+
+    // 4. PATH (start.sh prepends bundle bin/).
     return "mds-mcp";
   }
 
@@ -148,4 +206,21 @@ export class McpBridge {
 function parsePort(url: string): number | undefined {
   const m = url.match(/:(\d+)(?:\/|$)/);
   return m ? Number(m[1]) : undefined;
+}
+
+function probePort(host: string, port: number, timeoutMs: number): Promise<boolean> {
+  return new Promise(resolve => {
+    const sock = new net.Socket();
+    let done = false;
+    const finish = (ok: boolean) => {
+      if (done) return; done = true;
+      sock.destroy();
+      resolve(ok);
+    };
+    sock.setTimeout(timeoutMs);
+    sock.on("connect", () => finish(true));
+    sock.on("timeout", () => finish(false));
+    sock.on("error", () => finish(false));
+    sock.connect(port, host);
+  });
 }

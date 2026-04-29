@@ -123,6 +123,18 @@
       {
         "command": "megadriveStudio.unloadRom",
         "title": "Sega: Unload ROM"
+      },
+      {
+        "command": "megadriveStudio.pauseEmu",
+        "title": "Sega: Pause"
+      },
+      {
+        "command": "megadriveStudio.resumeEmu",
+        "title": "Sega: Resume"
+      },
+      {
+        "command": "megadriveStudio.resetEmu",
+        "title": "Sega: Reset / Reload Last ROM"
       }
     ],
     "keybindings": [
@@ -256,31 +268,11 @@
         }
       ],
       "view/title": [
-        {
-          "command": "megadriveStudio.loadRom",
-          "when": "view == megadriveStudio.vram",
-          "group": "navigation@1"
-        },
-        {
-          "command": "megadriveStudio.unloadRom",
-          "when": "view == megadriveStudio.vram",
-          "group": "navigation@2"
-        },
-        {
-          "command": "megadriveStudio.loadRom",
-          "when": "view == megadriveStudio.sprites",
-          "group": "navigation@1"
-        },
-        {
-          "command": "megadriveStudio.loadRom",
-          "when": "view == megadriveStudio.m68kRegs",
-          "group": "navigation@1"
-        },
-        {
-          "command": "megadriveStudio.loadRom",
-          "when": "view == megadriveStudio.breakpoints",
-          "group": "navigation@1"
-        }
+        { "command": "megadriveStudio.loadRom",   "when": "view == megadriveStudio.vram", "group": "navigation@1" },
+        { "command": "megadriveStudio.unloadRom", "when": "view == megadriveStudio.vram", "group": "navigation@2" },
+        { "command": "megadriveStudio.pauseEmu",  "when": "view == megadriveStudio.vram", "group": "navigation@3" },
+        { "command": "megadriveStudio.resumeEmu", "when": "view == megadriveStudio.vram", "group": "navigation@4" },
+        { "command": "megadriveStudio.resetEmu",  "when": "view == megadriveStudio.vram", "group": "navigation@5" }
       ]
     },
     "configuration": {
