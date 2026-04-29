@@ -16,11 +16,13 @@ mod ffi;
 mod notifications;
 mod resources;
 mod server;
+mod target;
 mod tools;
 mod transport;
 
 use emulator::EmulatorActor;
 use notifications::Notifier;
+use target::{EdProConfig, TargetKind};
 
 /// Megadrive Studio MCP server.
 #[derive(Debug, Parser)]
@@ -54,6 +56,15 @@ struct Cli {
     /// emission per URI (range 1..=30; default 4).
     #[arg(long, value_name = "HZ", default_value_t = 4)]
     ui_refresh_hz: u32,
+
+    /// Target backend: `emulator` (default, in-process libretro core) or
+    /// `edpro` (Mega Everdrive Pro hardware over USB; stubbed in M5-prep).
+    #[arg(long, value_name = "KIND", default_value = "emulator")]
+    target: String,
+
+    /// Serial port for the EdPro target. Ignored when `--target emulator`.
+    #[arg(long, value_name = "PATH", default_value = "/dev/everdrive")]
+    edpro_port: PathBuf,
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -68,12 +79,19 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let port = cli.http.or(cli.sse);
+    let target_kind = TargetKind::parse(&cli.target)
+        .ok_or_else(|| anyhow::anyhow!("unknown --target {:?}", cli.target))?;
+    let edpro_cfg = EdProConfig {
+        port: cli.edpro_port.clone(),
+        ..Default::default()
+    };
 
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
         libra_present = cfg!(libra_present),
         transport = if port.is_some() { "http" } else { "stdio" },
         core = %cli.core.display(),
+        target = target_kind.as_str(),
         "mds-mcp starting"
     );
 
@@ -82,8 +100,8 @@ async fn main() -> Result<()> {
     notifier.spawn(&actor);
 
     match port {
-        Some(p) => transport::run_http(actor, notifier, p).await?,
-        None => transport::run_stdio(actor, notifier).await?,
+        Some(p) => transport::run_http(actor, notifier, target_kind, edpro_cfg, p).await?,
+        None => transport::run_stdio(actor, notifier, target_kind, edpro_cfg).await?,
     }
     Ok(())
 }

@@ -16,8 +16,11 @@ out/
 # VS Code local (settings machine-specific)
 .vscode/settings.local.json
 
-# Rust
-target/
+# Rust build artifacts. The leading `/` anchors this to the repo root and
+# subdirectory `target/` (e.g. mds-mcp/target/) so that source folders named
+# `target` (mds-mcp/src/target/) aren't accidentally excluded.
+/target/
+/*/target/
 
 # Python
 __pycache__/

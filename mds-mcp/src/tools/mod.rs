@@ -15,6 +15,7 @@ use std::path::PathBuf;
 
 use crate::emulator::{breakpoints::BpKind, breakpoints::BpSpace, decode, frame as fbuf, MemorySpace};
 use crate::server::MdsServer;
+use crate::target::{TargetKind, NOT_SUPPORTED};
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct LoadRomArgs {
@@ -99,6 +100,31 @@ struct ReadMemoryResult {
 fn ok_json(value: serde_json::Value) -> CallToolResult {
     CallToolResult::success(vec![Content::text(value.to_string())])
 }
+
+/// Returned by emulator-only tools when running against the EdPro target
+/// stub. Carries `ok:false` + a structured `reason` so callers can branch
+/// without parsing free-form strings.
+fn not_supported_on_target(tool: &str) -> CallToolResult {
+    ok_json(serde_json::json!({
+        "ok": false,
+        "reason": NOT_SUPPORTED,
+        "tool": tool,
+        "message": format!("{tool} is not supported on the EdPro hardware target stub (M5.1)"),
+    }))
+}
+
+impl MdsServer {
+    /// Returns `Some(not_supported)` if the current target is EdPro,
+    /// otherwise `None` and the caller proceeds. Lets emulator-only tools
+    /// short-circuit without an early-return per tool.
+    fn block_on_edpro(&self, tool: &'static str) -> Option<CallToolResult> {
+        if self.target_kind() == TargetKind::EdPro {
+            Some(not_supported_on_target(tool))
+        } else {
+            None
+        }
+    }
+}
 fn err_text(msg: impl Into<String>) -> CallToolResult {
     CallToolResult::error(vec![Content::text(msg.into())])
 }
@@ -117,6 +143,7 @@ impl MdsServer {
         &self,
         Parameters(args): Parameters<LoadRomArgs>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(r) = self.block_on_edpro("mega_load_rom") { return Ok(r); }
         let r = self.actor().load_rom(PathBuf::from(args.path)).await;
         Ok(match r {
             Ok(info) => ok_json(serde_json::json!({
@@ -132,6 +159,7 @@ impl MdsServer {
 
     #[tool(description = "Unload the currently loaded ROM and reset emulator state.")]
     async fn mega_unload_rom(&self) -> Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(r) = self.block_on_edpro("mega_unload_rom") { return Ok(r); }
         Ok(match self.actor().unload_rom().await {
             Ok(()) => ok_json(serde_json::json!({"ok": true})),
             Err(e) => err_text(format!("unload_rom failed: {e}")),
@@ -140,6 +168,7 @@ impl MdsServer {
 
     #[tool(description = "Pause the emulator. Returns the current frame counter.")]
     async fn mega_pause(&self) -> Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(r) = self.block_on_edpro("mega_pause") { return Ok(r); }
         Ok(match self.actor().pause().await {
             Ok(frame) => ok_json(serde_json::json!({"ok": true, "frame": frame})),
             Err(e) => err_text(format!("pause failed: {e}")),
@@ -148,6 +177,7 @@ impl MdsServer {
 
     #[tool(description = "Resume the emulator. Returns the current frame counter.")]
     async fn mega_resume(&self) -> Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(r) = self.block_on_edpro("mega_resume") { return Ok(r); }
         Ok(match self.actor().resume().await {
             Ok(frame) => ok_json(serde_json::json!({"ok": true, "frame": frame})),
             Err(e) => err_text(format!("resume failed: {e}")),
@@ -159,6 +189,7 @@ impl MdsServer {
         &self,
         Parameters(args): Parameters<StepFrameArgs>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(r) = self.block_on_edpro("mega_step_frame") { return Ok(r); }
         let n = args.n.unwrap_or(1).min(10_000);
         Ok(match self.actor().step_frame(n).await {
             Ok(frame) => ok_json(serde_json::json!({"ok": true, "frame": frame})),
@@ -171,6 +202,7 @@ impl MdsServer {
         &self,
         Parameters(args): Parameters<StepInstructionArgs>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(r) = self.block_on_edpro("mega_step_instruction") { return Ok(r); }
         let n = args.n.unwrap_or(1).clamp(1, 1_000_000);
         Ok(match self.actor().step_instruction(n).await {
             Ok(out) => ok_json(serde_json::json!({
@@ -190,6 +222,7 @@ impl MdsServer {
         &self,
         Parameters(args): Parameters<ReadMemoryArgs>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(r) = self.block_on_edpro("mega_read_memory") { return Ok(r); }
         let Some(space) = MemorySpace::parse(&args.space) else {
             return Ok(err_text(format!("unknown memory space: {:?}", args.space)));
         };
@@ -218,6 +251,7 @@ impl MdsServer {
         &self,
         Parameters(args): Parameters<WriteMemoryArgs>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(r) = self.block_on_edpro("mega_write_memory") { return Ok(r); }
         let Some(space) = MemorySpace::parse(&args.space) else {
             return Ok(err_text(format!("unknown memory space: {:?}", args.space)));
         };
@@ -233,6 +267,7 @@ impl MdsServer {
 
     #[tool(description = "Get the 24 VDP registers and a decoded summary (planes, sprite table, H40/V30, ...).")]
     async fn mega_get_vdp_registers(&self) -> Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(r) = self.block_on_edpro("mega_get_vdp_registers") { return Ok(r); }
         let blob = self
             .actor()
             .snapshot_region(MemorySpace::VdpState)
@@ -244,6 +279,7 @@ impl MdsServer {
 
     #[tool(description = "Get the four 16-colour palette lines as RGB triplets (CRAM 9-bit BGR expanded to 8-bit).")]
     async fn mega_get_palettes(&self) -> Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(r) = self.block_on_edpro("mega_get_palettes") { return Ok(r); }
         let cram = self
             .actor()
             .snapshot_region(MemorySpace::Cram)
@@ -255,6 +291,7 @@ impl MdsServer {
 
     #[tool(description = "Decode the sprite attribute table (up to 80 sprites). Walks the linked list from VDP reg #5.")]
     async fn mega_get_sprites(&self) -> Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(r) = self.block_on_edpro("mega_get_sprites") { return Ok(r); }
         let vdp = self
             .actor()
             .snapshot_region(MemorySpace::VdpState)
@@ -275,6 +312,7 @@ impl MdsServer {
         &self,
         Parameters(args): Parameters<DumpTileArgs>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(r) = self.block_on_edpro("mega_dump_tile") { return Ok(r); }
         let format = args.format.as_deref().unwrap_or("8x8");
         let palette_idx = args.palette.unwrap_or(0).min(3);
         let vram = self
@@ -318,6 +356,7 @@ impl MdsServer {
 
     #[tool(description = "Decode the 68k registers (D0..D7, A0..A7, PC, SR, USP, SSP) from the m68k_state blob.")]
     async fn mega_get_68k_registers(&self) -> Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(r) = self.block_on_edpro("mega_get_68k_registers") { return Ok(r); }
         let blob = self
             .actor()
             .snapshot_region(MemorySpace::M68kState)
@@ -333,6 +372,7 @@ impl MdsServer {
 
     #[tool(description = "Decode the Z80 registers from the Z80 state blob plus the bus state blob. Returns {af, bc, de, hl, ix, iy, pc, sp, halt, iff1, iff2, im, cycles, bus_requested, bus_reset}.")]
     async fn mega_get_z80_registers(&self) -> Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(r) = self.block_on_edpro("mega_get_z80_registers") { return Ok(r); }
         let state_blob = self
             .actor()
             .snapshot_region(MemorySpace::Z80)
@@ -356,6 +396,7 @@ impl MdsServer {
         &self,
         Parameters(args): Parameters<BreakpointArgs>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(r) = self.block_on_edpro("mega_set_breakpoint") { return Ok(r); }
         let Some(addr) = args.addr else {
             return Ok(err_text("missing required field: addr"));
         };
@@ -390,6 +431,7 @@ impl MdsServer {
         &self,
         Parameters(args): Parameters<ClearBreakpointArgs>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(r) = self.block_on_edpro("mega_clear_breakpoint") { return Ok(r); }
         Ok(match self.actor().clear_breakpoint(args.id).await {
             Ok(removed) => ok_json(serde_json::json!({"ok": true, "removed": removed})),
             Err(e) => err_text(format!("clear_breakpoint failed: {e}")),
@@ -398,6 +440,7 @@ impl MdsServer {
 
     #[tool(description = "List active breakpoints. Returns {breakpoints: [{id, addr, kind, space, hit_count, enabled}, ...]}.")]
     async fn mega_list_breakpoints(&self) -> Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(r) = self.block_on_edpro("mega_list_breakpoints") { return Ok(r); }
         Ok(match self.actor().list_breakpoints().await {
             Ok(list) => ok_json(serde_json::json!({
                 "breakpoints": list,
@@ -408,6 +451,7 @@ impl MdsServer {
 
     #[tool(description = "Continue execution after a breakpoint halt. If the emulator isn't halted-on-BP, behaves like `mega_resume`. Returns the current frame counter.")]
     async fn mega_continue(&self) -> Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(r) = self.block_on_edpro("mega_continue") { return Ok(r); }
         Ok(match self.actor().continue_after_halt().await {
             Ok(frame) => ok_json(serde_json::json!({"ok": true, "frame": frame})),
             Err(e) => err_text(format!("continue failed: {e}")),
@@ -419,6 +463,7 @@ impl MdsServer {
         &self,
         Parameters(args): Parameters<ScreenshotArgs>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(r) = self.block_on_edpro("mega_screenshot") { return Ok(r); }
         let frame = match self.actor().screenshot().await {
             Ok(Some(f)) => f,
             Ok(None) => {
@@ -457,6 +502,7 @@ impl MdsServer {
         &self,
         Parameters(args): Parameters<StateSlotArgs>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(r) = self.block_on_edpro("mega_save_state") { return Ok(r); }
         let slot = args.slot.unwrap_or(0);
         Ok(match self.actor().save_state(slot).await {
             Ok(size) => ok_json(serde_json::json!({"ok": true, "size": size})),
@@ -469,6 +515,7 @@ impl MdsServer {
         &self,
         Parameters(args): Parameters<StateSlotArgs>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(r) = self.block_on_edpro("mega_load_state") { return Ok(r); }
         let slot = args.slot.unwrap_or(0);
         Ok(match self.actor().load_state(slot).await {
             Ok(()) => ok_json(serde_json::json!({"ok": true})),
@@ -476,8 +523,20 @@ impl MdsServer {
         })
     }
 
-    #[tool(description = "Get emulator status: ROM-loaded flag, paused flag, frame counter, average FPS, and target.")]
+    #[tool(description = "Get emulator/hardware status: rom_loaded, paused, frame, fps_avg, target (\"emulator\" or \"edpro\"), libra_linked, connected (EdPro only).")]
     async fn mega_get_status(&self) -> Result<CallToolResult, rmcp::ErrorData> {
+        if self.target_kind() == TargetKind::EdPro {
+            return Ok(ok_json(serde_json::json!({
+                "rom_loaded": false,
+                "paused": true,
+                "frame": 0,
+                "fps_avg": 0.0,
+                "target": "edpro",
+                "libra_linked": cfg!(libra_present),
+                "connected": false,
+                "edpro_port": self.edpro_cfg().port.to_string_lossy(),
+            })));
+        }
         Ok(match self.actor().status().await {
             Ok(s) => ok_json(serde_json::json!({
                 "rom_loaded": s.rom_loaded,
@@ -486,6 +545,7 @@ impl MdsServer {
                 "fps_avg": s.fps_avg,
                 "target": s.target,
                 "libra_linked": s.libra_linked,
+                "connected": true,
             })),
             Err(e) => err_text(format!("status failed: {e}")),
         })

@@ -21,6 +21,7 @@ use rmcp::{
 use crate::emulator::EmulatorActor;
 use crate::notifications::{Notifier, SnapshotCache};
 use crate::resources;
+use crate::target::{EdProConfig, TargetKind};
 
 pub struct MdsServer {
     actor: EmulatorActor,
@@ -28,10 +29,17 @@ pub struct MdsServer {
     subscriptions: Arc<Mutex<HashSet<String>>>,
     notifier: Notifier,
     snapshot_cache: SnapshotCache,
+    target_kind: TargetKind,
+    edpro_cfg: EdProConfig,
 }
 
 impl MdsServer {
-    pub fn new(actor: EmulatorActor, notifier: Notifier) -> Self {
+    pub fn new(
+        actor: EmulatorActor,
+        notifier: Notifier,
+        target_kind: TargetKind,
+        edpro_cfg: EdProConfig,
+    ) -> Self {
         let snapshot_cache = notifier.cache();
         Self {
             actor,
@@ -39,11 +47,21 @@ impl MdsServer {
             subscriptions: Arc::new(Mutex::new(HashSet::new())),
             notifier,
             snapshot_cache,
+            target_kind,
+            edpro_cfg,
         }
     }
 
     pub fn actor(&self) -> &EmulatorActor {
         &self.actor
+    }
+
+    pub fn target_kind(&self) -> TargetKind {
+        self.target_kind
+    }
+
+    pub fn edpro_cfg(&self) -> &EdProConfig {
+        &self.edpro_cfg
     }
 }
 
@@ -55,6 +73,8 @@ impl Clone for MdsServer {
             subscriptions: self.subscriptions.clone(),
             notifier: self.notifier.clone(),
             snapshot_cache: self.snapshot_cache.clone(),
+            target_kind: self.target_kind,
+            edpro_cfg: self.edpro_cfg.clone(),
         }
     }
 }
