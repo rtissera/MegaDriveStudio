@@ -12,6 +12,8 @@ use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc};
 
 use super::breakpoints::{Breakpoint, SharedBreakpoints};
+#[cfg(libra_present)]
+use super::debug_api::{self, DebugTrampolineCtx};
 use super::decode;
 use super::frame::{self, FrameSlot};
 #[cfg(libra_present)]
@@ -30,6 +32,13 @@ struct LibraCtx {
     /// and dereferenced from the C video callback. Held in a `Box` so the
     /// pointer is stable for libra's lifetime.
     frame_slot: Box<FrameSlot>,
+    /// Debug API function-pointer table (memory ID 0x109). Installed lazily
+    /// after `libra_load_game` once the core actually exposes it.
+    debug_api: Option<*const ffi::LibraMdDebugApi>,
+    /// Heap-allocated trampoline context, leaked so it lives as long as the
+    /// core. Pointer handed to clownmdemu as `userdata` for both BP/WP
+    /// callbacks. Owned (we free it on `Drop`).
+    debug_ctx: Option<*mut DebugTrampolineCtx>,
 }
 
 #[cfg(libra_present)]
@@ -74,6 +83,8 @@ impl LibraCtx {
             raw,
             core_loaded: false,
             frame_slot,
+            debug_api: None,
+            debug_ctx: None,
         })
     }
     fn frame_slot(&self) -> &FrameSlot {
@@ -101,12 +112,63 @@ impl LibraCtx {
     fn run_frame(&self) {
         unsafe { ffi::libra_run(self.raw) }
     }
+
+    /// Probe + install the M4 debug API. Returns true on success; idempotent.
+    fn install_debug_api(&mut self, bps: &SharedBreakpoints) -> bool {
+        if self.debug_api.is_some() {
+            return true;
+        }
+        let installed = unsafe { debug_api::install(self.raw, bps.clone()) };
+        if let Some((api, ctx)) = installed {
+            self.debug_api = Some(api);
+            self.debug_ctx = Some(ctx);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn debug_request_halt(&self) {
+        if let Some(api) = self.debug_api {
+            if let Some(f) = unsafe { (*api).request_halt } {
+                unsafe { f() };
+            }
+        }
+    }
+
+    fn debug_clear_halt(&self) {
+        if let Some(api) = self.debug_api {
+            if let Some(f) = unsafe { (*api).clear_halt_request } {
+                unsafe { f() };
+            }
+        }
+    }
+
+    fn take_halt(&self) -> Option<debug_api::HaltInfo> {
+        let ctx = self.debug_ctx?;
+        unsafe { (*ctx).take_halt() }
+    }
 }
 
 #[cfg(libra_present)]
 impl Drop for LibraCtx {
     fn drop(&mut self) {
         if !self.raw.is_null() {
+            // Detach our callbacks before tearing down the core so the C side
+            // does not call back into freed Rust memory.
+            if let Some(api) = self.debug_api.take() {
+                unsafe {
+                    if let Some(f) = (*api).set_breakpoint_callback {
+                        f(None, std::ptr::null_mut());
+                    }
+                    if let Some(f) = (*api).set_watchpoint_callback {
+                        f(None, std::ptr::null_mut());
+                    }
+                }
+            }
+            if let Some(ctx) = self.debug_ctx.take() {
+                drop(unsafe { Box::from_raw(ctx) });
+            }
             unsafe {
                 ffi::libra_unload_game(self.raw);
                 if self.core_loaded {
@@ -144,6 +206,22 @@ impl LibraCtx {
     fn frame_slot(&self) -> &FrameSlot {
         &self.frame_slot
     }
+    fn install_debug_api(&mut self, _bps: &SharedBreakpoints) -> bool {
+        false
+    }
+    fn debug_request_halt(&self) {}
+    fn debug_clear_halt(&self) {}
+    fn take_halt(&self) -> Option<NoLibraHalt> {
+        None
+    }
+}
+
+#[cfg(not(libra_present))]
+#[allow(dead_code)]
+struct NoLibraHalt {
+    pub id: u32,
+    pub pc: u32,
+    pub kind: u32,
 }
 
 unsafe impl Send for LibraCtx {}
@@ -225,6 +303,8 @@ pub fn run(
         state.libra.run_frame();
         state.frame = state.frame.saturating_add(1);
         state.frames_in_window += 1;
+        // If a BP/WP fired during this frame, halt the actor and notify.
+        check_halt(&mut state, &bcast);
         let elapsed = state.last_fps_window.elapsed();
         if elapsed >= Duration::from_secs(1) {
             state.fps_avg =
@@ -273,6 +353,9 @@ fn handle_command(
                     let p = path.to_string_lossy().to_string();
                     if !state.libra.load_game(&p) {
                         tracing::warn!(rom = %p, "libra_load_game failed");
+                    } else if state.libra.install_debug_api(&state.breakpoints) {
+                        state.debug_api_available = true;
+                        tracing::info!("libretro debug API (mem id 0x109) installed");
                     }
                 }
                 let info = RomInfo {
@@ -314,6 +397,10 @@ fn handle_command(
             for _ in 0..n {
                 state.libra.run_frame();
                 state.frame = state.frame.saturating_add(1);
+                check_halt(state, bcast);
+                if state.halted_on_bp.is_some() {
+                    break;
+                }
             }
             publish_changes(state, bcast);
             state.paused = true;
@@ -412,6 +499,7 @@ fn handle_command(
         }
         Command::ContinueAfterHalt { reply } => {
             state.halted_on_bp = None;
+            state.libra.debug_clear_halt();
             state.paused = false;
             let _ = reply.send(Ok(state.frame));
         }
@@ -444,13 +532,24 @@ fn step_instruction(
         anyhow::bail!("no ROM loaded");
     }
     let n = n.clamp(1, 1_000_000);
-    // When agent A's debug API is wired in: call `Clown68000_RequestHalt`
-    // after `n` instructions, then run a frame so the core advances exactly
-    // that many instructions before halting. Until then we fall back to
-    // frame granularity and surface `granularity: "frame"` to the IDE.
-    for _ in 0..n {
-        state.libra.run_frame();
-        if !state.debug_api_available {
+    if state.debug_api_available {
+        // Real instruction-granular step: ask the core to halt after one
+        // instruction, run one frame's worth of cycles (which the core will
+        // exit early once the halt request is honoured), clear the halt.
+        for _ in 0..n {
+            state.libra.debug_request_halt();
+            state.libra.run_frame();
+            state.libra.debug_clear_halt();
+            // A breakpoint may have fired during the same step.
+            if state.libra.take_halt().is_some() {
+                state.halted_on_bp = Some(0);
+                break;
+            }
+        }
+    } else {
+        // Fallback: frame granularity until the patched core lands.
+        for _ in 0..n {
+            state.libra.run_frame();
             state.frame = state.frame.saturating_add(1);
         }
     }
@@ -474,6 +573,45 @@ fn step_instruction(
             "frame"
         },
     })
+}
+
+/// After `libra_run` returns, check whether the BP/WP trampoline tripped.
+/// If so, halt the actor and emit a halt event on the breakpoint resource.
+fn check_halt(state: &mut State, bcast: &broadcast::Sender<ResourceEvent>) {
+    if !state.debug_api_available {
+        return;
+    }
+    let Some(info) = state.libra.take_halt() else { return };
+    state.libra.debug_clear_halt();
+    // Bump the hit count on the matching BP.
+    state.breakpoints.update(|t| {
+        if let Some(b) = t.entries.iter_mut().find(|b| b.id == info.id) {
+            b.hit_count += 1;
+        }
+    });
+    state.halted_on_bp = Some(info.id);
+    state.paused = true;
+    publish_breakpoints(state, bcast);
+    // Refresh M68k regs so the IDE's CPU view auto-updates.
+    publish_decoded(state, bcast, MemorySpace::M68kState, "mega://m68k/registers", |b| {
+        decode::decode_m68k(b).and_then(|r| serde_json::to_vec(&r).ok())
+    });
+    if bcast.receiver_count() > 0 {
+        let payload = serde_json::json!({
+            "kind": "halted",
+            "reason": if info.kind == 0 { "breakpoint" } else { "watchpoint" },
+            "bp_id": info.id,
+            "addr": info.pc,
+            "frame": state.frame,
+        });
+        if let Ok(bytes) = serde_json::to_vec(&payload) {
+            let _ = bcast.send(ResourceEvent {
+                uri: "mega://halts",
+                mime: "application/json",
+                payload: Arc::new(bytes),
+            });
+        }
+    }
 }
 
 fn publish_breakpoints(state: &mut State, bcast: &broadcast::Sender<ResourceEvent>) {

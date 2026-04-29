@@ -58,3 +58,41 @@ pub const LIBRA_BP_EXEC: u32 = 1 << 0;
 pub const LIBRA_BP_READ: u32 = 1 << 1;
 pub const LIBRA_BP_WRITE: u32 = 1 << 2;
 pub const LIBRA_BP_ACCESS: u32 = LIBRA_BP_READ | LIBRA_BP_WRITE;
+
+/// retro_get_memory_data ID returning a pointer to a `LibraMdDebugApi` struct
+/// (M4 — agent A shipped this in the clownmdemu fork). Stable for the lifetime
+/// of the loaded core. See `vendor/clownmdemu-libretro/source/libra-extended-memory.h`.
+pub const LIBRA_MEMORY_DEBUG_API: u32 = 0x109;
+
+/// Function-pointer table exposed by `LIBRA_MEMORY_DEBUG_API`. Layout must
+/// match `struct libra_md_debug_api` in `libra-extended-memory.h`.
+#[repr(C)]
+pub struct LibraMdDebugApi {
+    pub request_halt: Option<unsafe extern "C" fn()>,
+    pub clear_halt_request: Option<unsafe extern "C" fn()>,
+    pub set_breakpoint_callback: Option<
+        unsafe extern "C" fn(
+            cb: Option<
+                unsafe extern "C" fn(
+                    userdata: *mut std::ffi::c_void,
+                    pc: std::os::raw::c_ulong,
+                ) -> std::os::raw::c_int,
+            >,
+            userdata: *mut std::ffi::c_void,
+        ),
+    >,
+    pub set_watchpoint_callback: Option<
+        unsafe extern "C" fn(
+            cb: Option<
+                unsafe extern "C" fn(
+                    userdata: *mut std::ffi::c_void,
+                    addr: std::os::raw::c_ulong,
+                    size: std::os::raw::c_uchar,
+                    is_write: std::os::raw::c_int,
+                    value: std::os::raw::c_ulong,
+                ) -> std::os::raw::c_int,
+            >,
+            userdata: *mut std::ffi::c_void,
+        ),
+    >,
+}

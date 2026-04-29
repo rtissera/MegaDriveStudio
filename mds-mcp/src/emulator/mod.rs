@@ -6,6 +6,8 @@
 //! every frame is a no-op.
 
 pub mod breakpoints;
+#[cfg(libra_present)]
+pub mod debug_api;
 pub mod decode;
 pub mod frame;
 pub mod memory;
