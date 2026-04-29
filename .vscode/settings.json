@@ -1,0 +1,62 @@
+{
+  // ── Genesis Code (zerasul) ────────────────────────────────────────────────
+  "genesis-code.gdk": "__GDK__",
+  "genesis-code.gendev": "__MARSDEV__",
+  "genesis-code.toolchain": "MARSDEV",
+  "genesis-code.runPath": "__BLASTEM__",
+
+  // ── C/C++ IntelliSense ────────────────────────────────────────────────────
+  "C_Cpp.default.compilerPath": "__MARSDEV__/m68k-elf/bin/m68k-elf-gcc",
+  "C_Cpp.default.intelliSenseMode": "gcc-arm",
+  "C_Cpp.default.cStandard": "c11",
+  "C_Cpp.default.includePath": [
+    "${workspaceFolder}/src",
+    "${workspaceFolder}/res",
+    "__GDK__/inc",
+    "__GDK__/inc/ext"
+  ],
+  "C_Cpp.default.defines": [
+    "MD_PAL=0",
+    "ENABLE_BANK_SWITCH=0"
+  ],
+  "C_Cpp.default.compilerArgs": [
+    "-m68000",
+    "-fno-builtin"
+  ],
+
+  // ── Fichiers ──────────────────────────────────────────────────────────────
+  "files.associations": {
+    "*.h": "c",
+    "*.c": "c",
+    "*.s": "asm",
+    "*.68k": "asm",
+    "*.res": "plaintext"
+  },
+  "files.exclude": {
+    "out/": false,
+    "**/*.o": true,
+    "**/*.d": true
+  },
+
+  // ── Terminal ──────────────────────────────────────────────────────────────
+  "terminal.integrated.env.linux": {
+    "GDK": "__GDK__",
+    "MARSDEV": "__MARSDEV__",
+    "BLASTEM": "__BLASTEM__",
+    "CLOWNMDEMU": "__CLOWNMDEMU__",
+    "PATH": "__MARSDEV__/m68k-elf/bin:${env:PATH}"
+  },
+
+  // ── Makefile ──────────────────────────────────────────────────────────────
+  "makefile.makePath": "make",
+  "makefile.defaultTarget": "debug",
+
+  // ── Editor ────────────────────────────────────────────────────────────────
+  "editor.formatOnSave": false,
+  "editor.tabSize": 4,
+  "editor.insertSpaces": true,
+
+  // ── Debug ─────────────────────────────────────────────────────────────────
+  "debug.allowBreakpointsEverywhere": true,
+  "debug.internalConsoleOptions": "openOnSessionStart"
+}

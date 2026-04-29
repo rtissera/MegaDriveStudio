@@ -1,0 +1,124 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // TARGET A : BlastEm — GDB via pipe (Linux/Mac, recommandé)
+    // ══════════════════════════════════════════════════════════════════════════
+    {
+      "name": "▶ BlastEm GDB (pipe)",
+      "type": "gdb",
+      "request": "launch",
+      "target": "out/rom.bin",
+      "gdbpath": "${env:MARSDEV}/m68k-elf/bin/m68k-elf-gdb",
+      "cwd": "${workspaceFolder}",
+      "valuesFormatting": "parseText",
+      "autorun": [
+        // Charge les symboles de debug
+        "file out/rom.elf",
+        // Connecte BlastEm via pipe (lance l'émulateur automatiquement)
+        "target remote | ${env:BLASTEM} out/rom.bin -D",
+        "set architecture m68k:68000",
+        // Remonte les sources SGDK vers le bon chemin local
+        "set substitute-path /opt/sgdk ${env:GDK}",
+        "set substitute-path /home/runner/sgdk ${env:GDK}",
+        // Taille des packets mémoire
+        "set remote memory-write-packet-size 256",
+        "set remote memory-read-packet-size 256",
+        // Affichage
+        "set print pretty on",
+        "set print array on"
+      ],
+      "stopAtConnect": true,
+      "preLaunchTask": "Build: Debug ROM",
+      "presentation": {
+        "hidden": false,
+        "group": "emulator",
+        "order": 1
+      }
+    },
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // TARGET A bis : BlastEm — GDB via socket (fallback / CI headless)
+    // Lance d'abord "BlastEm: Start GDB server (socket :1234)" ou
+    // make debug-gdb-socket en terminal
+    // ══════════════════════════════════════════════════════════════════════════
+    {
+      "name": "▶ BlastEm GDB (socket :1234)",
+      "type": "gdb",
+      "request": "attach",
+      "target": "localhost:1234",
+      "gdbpath": "${env:MARSDEV}/m68k-elf/bin/m68k-elf-gdb",
+      "cwd": "${workspaceFolder}",
+      "valuesFormatting": "parseText",
+      "autorun": [
+        "file out/rom.elf",
+        "set architecture m68k:68000",
+        "set substitute-path /opt/sgdk ${env:GDK}",
+        "set substitute-path /home/runner/sgdk ${env:GDK}",
+        "set remote memory-write-packet-size 256",
+        "set remote memory-read-packet-size 256",
+        "set print pretty on"
+      ],
+      "stopAtConnect": true,
+      // Note : lance d'abord la task "BlastEm: Start GDB server (socket :1234)"
+      "presentation": {
+        "hidden": false,
+        "group": "emulator",
+        "order": 2
+      }
+    },
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // TARGET B : ClownMDEmu — pas de GDB, launch simple
+    // Les debug menus sont dans l'UI ImGui de l'émulateur lui-même
+    // ══════════════════════════════════════════════════════════════════════════
+    {
+      "name": "▶ ClownMDEmu (VDP inspect)",
+      "type": "node-terminal",
+      "request": "launch",
+      "command": "make run-clown",
+      "cwd": "${workspaceFolder}",
+      "presentation": {
+        "hidden": false,
+        "group": "emulator",
+        "order": 3
+      }
+      // Pas de GDB — ouvre les menus Debug dans l'émulateur (ImGui)
+      // Debug > 68000 Registers, VDP Registers, VRAM Viewer, Sprite Debugger...
+    },
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // TARGET C : Hardware — Mega Everdrive Pro via proxy RSP GDB
+    // Lance d'abord la task "Debug: Hardware [GDB]" (upload + proxy)
+    // ══════════════════════════════════════════════════════════════════════════
+    {
+      "name": "▶ ED Pro GDB (hardware)",
+      "type": "gdb",
+      "request": "attach",
+      "target": "localhost:2345",
+      "gdbpath": "${env:MARSDEV}/m68k-elf/bin/m68k-elf-gdb",
+      "cwd": "${workspaceFolder}",
+      "valuesFormatting": "parseText",
+      "autorun": [
+        "file out/rom.elf",
+        "set architecture m68k:68000",
+        "set substitute-path /opt/sgdk ${env:GDK}",
+        // Hardware : réduire la taille des paquets (contrainte ED Pro USB)
+        "set remote memory-write-packet-size 64",
+        "set remote memory-read-packet-size 64",
+        // Pas de hardware watchpoints sur MD
+        "set remote hardware-watchpoint-limit 0",
+        "set remote hardware-breakpoint-limit 0",
+        "set print pretty on"
+      ],
+      "stopAtConnect": true,
+      "preLaunchTask": "Debug: Hardware [GDB]",
+      "presentation": {
+        "hidden": false,
+        "group": "hardware",
+        "order": 4
+      }
+    }
+  ]
+}

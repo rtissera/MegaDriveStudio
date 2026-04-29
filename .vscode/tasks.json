@@ -1,0 +1,203 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // BUILD
+    // ══════════════════════════════════════════════════════════════════════════
+    {
+      "label": "Build: Debug ROM",
+      "type": "shell",
+      "command": "make debug",
+      "group": { "kind": "build", "isDefault": true },
+      "presentation": { "reveal": "always", "panel": "shared", "showReuseMessage": false },
+      "problemMatcher": [
+        {
+          "owner": "m68k-gcc",
+          "fileLocation": ["relative", "${workspaceFolder}"],
+          "pattern": {
+            "regexp": "^(.+):(\\d+):(\\d+):\\s+(warning|error):\\s+(.+)$",
+            "file": 1, "line": 2, "column": 3, "severity": 4, "message": 5
+          }
+        }
+      ]
+    },
+    {
+      "label": "Build: Release ROM",
+      "type": "shell",
+      "command": "make release",
+      "group": "build",
+      "presentation": { "reveal": "always", "panel": "shared" },
+      "problemMatcher": []
+    },
+    {
+      "label": "Build: Clean",
+      "type": "shell",
+      "command": "make clean",
+      "group": "build",
+      "presentation": { "reveal": "always", "panel": "shared" }
+    },
+    {
+      "label": "Build: Rebuild SGDK lib",
+      "type": "shell",
+      "command": "make rebuild-sgdk",
+      "group": "build",
+      "presentation": { "reveal": "always", "panel": "dedicated" }
+    },
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // TARGET A : BlastEm
+    // ══════════════════════════════════════════════════════════════════════════
+    {
+      "label": "Run: BlastEm (sans debug)",
+      "type": "shell",
+      "command": "make run-blastem",
+      "group": "test",
+      "dependsOn": "Build: Debug ROM",
+      "presentation": { "reveal": "always", "panel": "dedicated" }
+    },
+    {
+      "label": "BlastEm: Start GDB server (pipe)",
+      "type": "shell",
+      // Lance BlastEm en attente — VS Code s'y connecte via F5
+      "command": "echo '[BlastEm] Prêt — lance la config \"BlastEm GDB (pipe)\" dans VS Code (F5)' && ${BLASTEM:-blastem} out/rom.bin -D",
+      "group": "test",
+      "isBackground": true,
+      "problemMatcher": {
+        "pattern": { "regexp": "^$" },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": ".",
+          "endsPattern": "^$"
+        }
+      },
+      "presentation": { "reveal": "always", "panel": "dedicated", "group": "debug" }
+    },
+    {
+      "label": "BlastEm: Start GDB server (socket :1234)",
+      "type": "shell",
+      "command": "echo '[BlastEm] Écoute GDB sur :1234' && ${BLASTEM:-blastem} out/rom.bin -D",
+      "group": "test",
+      "isBackground": true,
+      "presentation": { "reveal": "always", "panel": "dedicated", "group": "debug" }
+    },
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // TARGET B : ClownMDEmu
+    // ══════════════════════════════════════════════════════════════════════════
+    {
+      "label": "Run: ClownMDEmu (VDP debug UI)",
+      "type": "shell",
+      "command": "${CLOWNMDEMU:-clownmdemu} out/rom.bin",
+      "group": "test",
+      "dependsOn": "Build: Debug ROM",
+      "presentation": { "reveal": "always", "panel": "dedicated" }
+    },
+    {
+      "label": "ClownMDEmu: KDebug to terminal",
+      "type": "shell",
+      // ClownMDEmu sort KDebug sur stdout en mode console
+      "command": "${CLOWNMDEMU:-clownmdemu} out/rom.bin 2>&1 | tee /tmp/kdebug-clown.log | grep --line-buffered '\\[KDEBUG\\]'",
+      "group": "test",
+      "isBackground": true,
+      "presentation": { "reveal": "always", "panel": "dedicated", "group": "klog" }
+    },
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // TARGET C : Hardware — Mega Everdrive Pro
+    // ══════════════════════════════════════════════════════════════════════════
+    {
+      "label": "ED Pro: Upload ROM",
+      "type": "shell",
+      "command": "make upload-edpro",
+      "group": "test",
+      "dependsOn": "Build: Debug ROM",
+      "presentation": { "reveal": "always", "panel": "dedicated" }
+    },
+    {
+      "label": "ED Pro: KLog monitor",
+      "type": "shell",
+      "command": "scripts/kdebug-monitor.sh ${EDPRO_PORT:-/dev/everdrive}",
+      "group": "test",
+      "isBackground": true,
+      "presentation": { "reveal": "always", "panel": "dedicated", "group": "klog" }
+    },
+    {
+      "label": "ED Pro: Start GDB proxy (RSP bridge)",
+      "type": "shell",
+      "command": "python3 scripts/gdb-proxy.py --port ${EDPRO_PORT:-/dev/everdrive} --gdb-port 2345",
+      "group": "test",
+      "isBackground": true,
+      "problemMatcher": {
+        "pattern": { "regexp": "^$" },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "\\[GDB proxy\\]",
+          "endsPattern": "^$"
+        }
+      },
+      "presentation": { "reveal": "always", "panel": "dedicated", "group": "debug" }
+    },
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // COMPOUND TASKS
+    // ══════════════════════════════════════════════════════════════════════════
+    {
+      "label": "Debug: Hardware [KLog]",
+      "dependsOn": ["ED Pro: Upload ROM", "ED Pro: KLog monitor"],
+      "dependsOrder": "sequence",
+      "group": "test",
+      "presentation": { "reveal": "always" }
+    },
+    {
+      "label": "Debug: Hardware [GDB]",
+      "dependsOn": ["ED Pro: Upload ROM", "ED Pro: Start GDB proxy (RSP bridge)"],
+      "dependsOrder": "sequence",
+      "group": "test",
+      "presentation": { "reveal": "always" }
+    },
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // CLAUDE
+    // ══════════════════════════════════════════════════════════════════════════
+    {
+      "label": "Claude: Explain last build error",
+      "type": "shell",
+      "command": "make debug 2>&1 | python3 scripts/claude-build-assist.py",
+      "group": "build",
+      "presentation": { "reveal": "always", "panel": "dedicated", "group": "claude" }
+    },
+    {
+      "label": "Claude: Analyze KDebug log",
+      "type": "shell",
+      "command": "python3 scripts/claude-build-assist.py --mode klog --file /tmp/kdebug.log",
+      "group": "test",
+      "presentation": { "reveal": "always", "panel": "dedicated", "group": "claude" }
+    },
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // MAINTENANCE
+    // ══════════════════════════════════════════════════════════════════════════
+    {
+      "label": "Rebuild: BlastEm from source",
+      "type": "shell",
+      "command": "make rebuild-blastem",
+      "group": "build",
+      "presentation": { "reveal": "always", "panel": "dedicated" }
+    },
+    {
+      "label": "Rebuild: ClownMDEmu from source",
+      "type": "shell",
+      "command": "make rebuild-clown",
+      "group": "build",
+      "presentation": { "reveal": "always", "panel": "dedicated" }
+    },
+    {
+      "label": "Info: Environnement",
+      "type": "shell",
+      "command": "make info",
+      "group": "build",
+      "presentation": { "reveal": "always", "panel": "shared" }
+    }
+  ]
+}

@@ -1,0 +1,28 @@
+# Build artifacts
+out/
+*.o
+*.d
+*.elf
+*.map
+*.bin
+
+# Logs debug
+/tmp/kdebug-*.log
+/tmp/gdb-proxy.pid
+
+# Environnement local (généré par setup.sh)
+*.local.sh
+
+# VS Code local (settings machine-specific)
+.vscode/settings.local.json
+
+# Rust
+target/
+
+# Python
+__pycache__/
+*.pyc
+
+# OS
+.DS_Store
+Thumbs.db

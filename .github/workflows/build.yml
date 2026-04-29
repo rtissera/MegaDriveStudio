@@ -1,0 +1,128 @@
+# =============================================================================
+# .github/workflows/build.yml
+# CI : build ROM + smoke test BlastEm + upload artefact
+# =============================================================================
+name: Build ROM
+
+on:
+  push:
+    branches: [ main, dev, "feature/**" ]
+    paths:
+      - 'src/**'
+      - 'res/**'
+      - 'Makefile'
+      - '.github/workflows/build.yml'
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  # ── Build ROM ───────────────────────────────────────────────────────────────
+  build:
+    name: Build ROM (SGDK Docker)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # SGDK via l'image Docker Doragasu (recommandée par Stef-D lui-même)
+      - name: Build ROM (debug)
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/src" \
+            -w /src \
+            registry.gitlab.com/doragasu/docker-sgdk:latest \
+            bash -c "make -f \$GDK/makefile.gen EXTRA_CFLAGS='-g -gdwarf-4 -O0' EXTRA_DEF='-DDEBUG'"
+
+      - name: Build ROM (release)
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/src" \
+            -w /src \
+            registry.gitlab.com/doragasu/docker-sgdk:latest \
+            bash -c "make -f \$GDK/makefile.gen clean && make -f \$GDK/makefile.gen EXTRA_CFLAGS='-O2'"
+          # Rename release ROM
+          cp out/rom.bin out/rom-release.bin
+
+      - name: Check ROM size
+        run: |
+          SIZE=$(stat -c%s out/rom.bin)
+          echo "ROM size: $SIZE bytes ($(echo "scale=1; $SIZE/1024" | bc) KB)"
+          # Mega Drive ROM max 4MB (SSF2 mapper) ou 512KB sans mapper
+          if [ "$SIZE" -gt 4194304 ]; then
+            echo "::error::ROM trop grande (>4MB)"
+            exit 1
+          fi
+
+      - name: Upload ROM artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: rom-${{ github.sha }}
+          path: |
+            out/rom.bin
+            out/rom-release.bin
+            out/rom.elf
+          retention-days: 30
+
+  # ── Smoke test BlastEm headless ─────────────────────────────────────────────
+  smoketest:
+    name: Smoke test (BlastEm headless)
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download ROM artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: rom-${{ github.sha }}
+          path: out/
+
+      - name: Install BlastEm deps
+        run: |
+          sudo apt-get install -y --no-install-recommends \
+            libsdl2-dev libglew-dev zlib1g-dev libpng-dev \
+            xvfb
+
+      - name: Build BlastEm
+        run: |
+          git clone --depth=1 https://github.com/libretro/blastem /tmp/blastem
+          cd /tmp/blastem
+          make -j$(nproc) CFLAGS="-O2" 2>&1 | tail -5
+
+      - name: Smoke test (run 5s headless)
+        run: |
+          # Lance BlastEm avec Xvfb pendant 5 secondes
+          # Vérifie qu'il ne crashe pas immédiatement
+          timeout 5 xvfb-run -a /tmp/blastem/blastem out/rom-release.bin || EXIT=$?
+          # exit code 124 = timeout (normal, le jeu tourne)
+          # exit code 0 = ROM s'est terminée proprement
+          # autre = crash
+          if [ "${EXIT:-0}" -ne 124 ] && [ "${EXIT:-0}" -ne 0 ]; then
+            echo "::error::BlastEm a crashé (exit $EXIT)"
+            exit 1
+          fi
+          echo "Smoke test OK (exit ${EXIT:-0})"
+
+  # ── Lint sources C ──────────────────────────────────────────────────────────
+  lint:
+    name: Lint C sources
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install cppcheck
+        run: sudo apt-get install -y cppcheck
+
+      - name: Run cppcheck
+        run: |
+          cppcheck \
+            --enable=warning,style,performance \
+            --suppress=missingInclude \
+            --error-exitcode=1 \
+            -I src \
+            src/

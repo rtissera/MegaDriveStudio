@@ -1,0 +1,45 @@
+# =============================================================================
+# .github/workflows/toolchain-cache.yml
+# Pré-build et cache du toolchain m68k pour accélérer la CI
+# Déclenché manuellement ou hebdomadairement
+# =============================================================================
+name: Cache Toolchain
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 3 * * 0'   # dimanche 3h UTC
+
+jobs:
+  cache-blastem:
+    name: Build & Cache BlastEm
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Cache BlastEm binary
+        id: cache-blastem
+        uses: actions/cache@v4
+        with:
+          path: /tmp/blastem-bin
+          key: blastem-${{ runner.os }}-${{ hashFiles('.github/workflows/toolchain-cache.yml') }}
+
+      - name: Build BlastEm (if not cached)
+        if: steps.cache-blastem.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get install -y --no-install-recommends \
+            libsdl2-dev libglew-dev zlib1g-dev libpng-dev
+          git clone --depth=1 https://github.com/libretro/blastem /tmp/blastem-src
+          cd /tmp/blastem-src
+          make -j$(nproc) CFLAGS="-O2"
+          mkdir -p /tmp/blastem-bin
+          cp blastem /tmp/blastem-bin/
+          # Copy shaders and default config needed by BlastEm
+          cp -r shaders /tmp/blastem-bin/ 2>/dev/null || true
+          cp default.cfg /tmp/blastem-bin/ 2>/dev/null || true
+
+      - name: Upload BlastEm artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: blastem-linux
+          path: /tmp/blastem-bin/
+          retention-days: 90
