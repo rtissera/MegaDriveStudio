@@ -2,8 +2,9 @@
 
 A self-contained SGDK 2.x homebrew skeleton you can poke at, debug, and rebuild
 without leaving the IDE. The project ships with a **prebuilt ROM at
-`out/rom.bin`** so the live debug views work even if you don't have Docker
-installed yet.
+`out/rom.bin`** plus the full SGDK + m68k-elf toolchain inside the bundle —
+**no Docker, no apt installs, no toolchain hunt**. Hit Ctrl+Shift+B and a
+fresh ROM drops to `out/rom.bin`.
 
 This folder is what `./start.sh` opens by default when you launch the
 **Megadrive Studio** Linux bundle.
@@ -63,30 +64,40 @@ within VSCodium, hover over a tool name in the Claude extension's tool list.
 
 ---
 
-## 3. Rebuild from source (optional, requires Docker)
+## 3. Rebuild from source (no Docker needed)
 
 The committed `out/rom.bin` is a snapshot of the SGDK build of `src/main.c`.
 To rebuild:
 
-1. **Install Docker** if you haven't:
-   <https://docs.docker.com/get-docker/>. The bundle does **not** ship
-   Docker — it is too large (~500 MB) to embed.
+1. **Launch via `./start.sh`** — it exports `$GDK`, prepends the bundled
+   `m68k-elf-gcc` and `java` to `$PATH`, then opens this folder in
+   VSCodium. No system Java, no system GCC, no Docker.
 2. Open the Command Palette (Ctrl+Shift+P) → **Tasks: Run Build Task**, or
    press **Ctrl+Shift+B**.
-3. The default task **Build ROM (Docker SGDK)** runs `zerasul/sgdk:2.00` in
-   a one-shot container. It mounts this folder at `/src`, runs
-   `make -f $GDK/makefile.gen EXTRA_CFLAGS="-O2"`, and drops the result at
-   `out/rom.bin`.
-4. The debug variant **Build ROM (Debug, Docker SGDK)** adds `-g -gdwarf-4
-   -O0` and `-DDEBUG`, useful for symbols + KDebug logging.
+3. The default task **Build ROM** runs `make` in this folder. The Makefile
+   is bundle-aware: if `$GDK` is unset (e.g. you opened the workspace from
+   a system VS Code, not via `start.sh`), it auto-discovers the bundled
+   toolchain at `../../toolchain/sgdk` relative to itself.
+4. The debug variant **Build ROM (Debug)** adds `-g -gdwarf-4 -O0` and
+   `-DDEBUG`, useful for symbols + KDebug logging.
 
-If Docker is missing, the task fails with a non-zero exit code; the
-`docker: command not found` message in the task output is your cue. Install
-Docker and rerun.
+The toolchain shipped under `toolchain/sgdk/` is **andwn/marsdev v1.0.0-rc1**
+(GCC 13.1.0 + binutils + SGDK 1.81), stripped to ~190 MB. The minimal JRE
+under `toolchain/jre/` (~55 MB, jlink-stripped from OpenJDK 21) powers
+`rescomp.jar` and `sizebnd.jar`.
 
-The same `zerasul/sgdk:2.00` image is what CI uses to produce the
-release-tagged ROM, so local and CI builds match bit-for-bit (modulo
-`ROM_VERSION`).
+### Building from a system VS Code (no `start.sh`)
+
+The Makefile auto-discovers the bundled toolchain via `../../toolchain/sgdk`,
+so opening this folder directly with system VSCode works as long as the
+bundle layout is intact. If you've moved the example out of the bundle, set
+`$GDK` manually:
+
+```bash
+export GDK=/path/to/megadrive-studio/toolchain/sgdk
+export PATH="$GDK/bin:/path/to/megadrive-studio/toolchain/jre/bin:$PATH"
+cd examples/hello-world && make
+```
 
 ---
 
@@ -141,10 +152,18 @@ If you cloned the `MegaDriveStudio` git repo directly (no bundle):
 - **F5 does nothing.** F5 is bound to `megadriveStudio.continue`, which
   only runs the emulator forward when a ROM is loaded and execution is
   halted. Load a ROM first.
-- **Build task: `docker: command not found`.** Install Docker
-  (<https://docs.docker.com/get-docker/>) and re-run the task.
-- **Build task: permission denied on Docker socket.** Add your user to
-  the `docker` group: `sudo usermod -aG docker $USER`, then log out/in.
+- **Build task: `make: command not found`.** The system has no `make`. The
+  bundle does NOT ship `make` itself — almost every Linux desktop has it
+  preinstalled. `sudo apt install make` (Debian/Ubuntu) or
+  `sudo dnf install make` (Fedora) and re-run.
+- **Build task: `m68k-elf-gcc: command not found`.** You opened the
+  workspace from a system VSCode without sourcing the bundle's env. Either
+  launch via `./start.sh` (preferred) or set `$GDK` + `$PATH` manually
+  per section 3 above.
+- **Build task: `Unable to access jarfile … rescomp.jar`** or
+  `java: command not found`. Same as above — the bundled JRE under
+  `toolchain/jre/bin` is not on `$PATH`. Launch via `./start.sh` or
+  prepend it manually.
 
 ---
 

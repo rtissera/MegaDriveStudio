@@ -2,23 +2,11 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "Build ROM (Docker SGDK)",
+      "label": "Build ROM",
       "type": "shell",
-      "command": "docker",
-      "args": [
-        "run", "--rm",
-        "--entrypoint", "/bin/bash",
-        "--user", "${env:UID}:${env:GID}",
-        "-v", "${workspaceFolder}:/src",
-        "-w", "/src",
-        "zerasul/sgdk:2.00",
-        "-c", "make -f $GDK/makefile.gen EXTRA_CFLAGS=\"-O2\""
-      ],
+      "command": "make",
       "options": {
-        "env": {
-          "UID": "1000",
-          "GID": "1000"
-        }
+        "cwd": "${workspaceFolder}"
       },
       "group": { "kind": "build", "isDefault": true },
       "problemMatcher": {
@@ -40,23 +28,15 @@
         "panel": "dedicated",
         "clear": true
       },
-      "detail": "Build the example ROM via the zerasul/sgdk:2.00 Docker image. Requires Docker (https://docs.docker.com/get-docker/). Output: out/rom.bin"
+      "detail": "Build the example ROM natively with the bundled SGDK + m68k-elf toolchain. No Docker needed. Output: out/rom.bin. Run via the bundle's start.sh so $GDK is set; otherwise the Makefile auto-discovers the bundled toolchain at ../../toolchain/sgdk."
     },
     {
-      "label": "Build ROM (Debug, Docker SGDK)",
+      "label": "Build ROM (Debug)",
       "type": "shell",
-      "command": "docker",
-      "args": [
-        "run", "--rm",
-        "--entrypoint", "/bin/bash",
-        "--user", "${env:UID}:${env:GID}",
-        "-v", "${workspaceFolder}:/src",
-        "-w", "/src",
-        "zerasul/sgdk:2.00",
-        "-c", "make -f $GDK/makefile.gen EXTRA_DEF=\"-DDEBUG\" EXTRA_CFLAGS=\"-g -gdwarf-4 -O0\""
-      ],
+      "command": "make",
+      "args": ["debug"],
       "options": {
-        "env": { "UID": "1000", "GID": "1000" }
+        "cwd": "${workspaceFolder}"
       },
       "group": "build",
       "problemMatcher": {
@@ -70,23 +50,15 @@
         ]
       },
       "presentation": { "reveal": "always", "panel": "dedicated", "clear": true },
-      "detail": "Build a debug ROM with DWARF-4 symbols. Requires Docker."
+      "detail": "Build a debug ROM with DWARF-4 symbols (native, bundled toolchain)."
     },
     {
       "label": "Clean",
       "type": "shell",
-      "command": "docker",
-      "args": [
-        "run", "--rm",
-        "--entrypoint", "/bin/bash",
-        "--user", "${env:UID}:${env:GID}",
-        "-v", "${workspaceFolder}:/src",
-        "-w", "/src",
-        "zerasul/sgdk:2.00",
-        "-c", "make -f $GDK/makefile.gen clean || true; rm -f out/*.bin out/*.elf out/*.map"
-      ],
+      "command": "make",
+      "args": ["clean"],
       "options": {
-        "env": { "UID": "1000", "GID": "1000" }
+        "cwd": "${workspaceFolder}"
       },
       "presentation": { "reveal": "silent" },
       "detail": "Remove build artifacts."

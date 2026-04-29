@@ -155,6 +155,64 @@ jobs:
             "${{ steps.vscodium.outputs.url }}"
           ls -lh /tmp/vscodium.tar.gz
 
+      # ── Marsdev (m68k-elf toolchain + SGDK) ─────────────────────────────────
+      # Inline the SGDK + m68k-elf cross-toolchain into the bundle so the
+      # example project's Build task works without Docker. We pull the
+      # andwn/marsdev v1.0.0-rc1 prebuilt linux-x86_64 release (GCC 13.1.0,
+      # SGDK 1.81), keep only the m68k-elf tree (drop sh-elf 32X bits), and
+      # strip aggressively. Runs ~190 MB on disk after pruning.
+      - name: Download + extract marsdev (m68k-elf only)
+        run: |
+          set -euo pipefail
+          curl -L --fail \
+            -o /tmp/marsdev.tar.xz \
+            https://github.com/andwn/marsdev/releases/download/v1.0.0-rc1/marsdev-v1.0.0-rc1-linux-x86_64.tar.xz
+          mkdir -p /tmp/marsdev-extract
+          # Only extract the m68k-elf subtree — sh-elf doubles the size and
+          # we don't ship 32X support in the bundle.
+          tar -xJf /tmp/marsdev.tar.xz -C /tmp/marsdev-extract \
+            mars/m68k-elf
+          mv /tmp/marsdev-extract/mars/m68k-elf /tmp/toolchain-stage
+          rm -rf /tmp/marsdev-extract /tmp/marsdev.tar.xz
+          du -sh /tmp/toolchain-stage
+
+      - name: Strip + prune marsdev toolchain
+        run: |
+          set -euo pipefail
+          # Strip ELF binaries (most are already stripped by the upstream
+          # release, but belt-and-braces — `|| true` because non-ELF entries
+          # in the same listing would otherwise abort the pipeline).
+          find /tmp/toolchain-stage -type f -executable \
+            -exec file {} \; 2>/dev/null \
+            | grep ELF | grep -v stripped | cut -d: -f1 \
+            | xargs -r strip --strip-unneeded 2>/dev/null || true
+          # Drop docs/locales/info/man — the SGDK Discord, not the bundle,
+          # is where homebrew users learn the toolchain.
+          find /tmp/toolchain-stage \
+            -type d \( -name doc -o -name info -o -name man -o -name locale \) \
+            -exec rm -rf {} + 2>/dev/null || true
+          # Drop GCC's bundled python (lto-dump introspection only).
+          rm -rf /tmp/toolchain-stage/share/gcc-*/python || true
+          # Drop the leftover out.lst from upstream's build (huge, useless).
+          rm -f /tmp/toolchain-stage/out.lst
+          du -sh /tmp/toolchain-stage
+          du -sh /tmp/toolchain-stage/* | sort -h
+
+      # ── Minimal JRE (rescomp/sizebnd need it) ───────────────────────────────
+      # Build a jlink-stripped runtime from the runner's openjdk so the
+      # bundle is fully self-contained. Targets ~55 MB.
+      - name: Build minimal JRE for rescomp/sizebnd
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y --no-install-recommends openjdk-21-jdk-headless
+          jlink \
+            --add-modules java.base,java.desktop,java.logging,java.xml \
+            --output /tmp/jre-min \
+            --strip-debug --no-header-files --no-man-pages \
+            --compress=2
+          du -sh /tmp/jre-min
+          /tmp/jre-min/bin/java -version
+
       - name: Assemble Linux bundle
         env:
           VERSION: ${{ steps.version.outputs.VERSION }}
@@ -194,11 +252,38 @@ jobs:
           mkdir -p "$BUNDLE/examples/hello-world/out"
           cp out/rom.bin "$BUNDLE/examples/hello-world/out/rom.bin" || true
 
+          # 4c. SGDK + m68k-elf toolchain + minimal JRE.
+          #     Lets the example's Build task run natively, no Docker.
+          mkdir -p "$BUNDLE/toolchain"
+          cp -a /tmp/toolchain-stage "$BUNDLE/toolchain/sgdk"
+          cp -a /tmp/jre-min         "$BUNDLE/toolchain/jre"
+
           # 5. Licenses.
           cp mds-mcp/LICENSE                                       "$BUNDLE/LICENSES/MDS-MIT.txt"
           cp "$BUNDLE/code/resources/app/LICENSE.txt"              "$BUNDLE/LICENSES/VSCodium-MIT.txt"
           cp vendor/libra/LICENSE                                  "$BUNDLE/LICENSES/libra-MIT.txt"
           cp vendor/clownmdemu-libretro/LICENCE.txt                "$BUNDLE/LICENSES/clownmdemu-AGPL.txt"
+          # SGDK is MIT (Stephane Dallongeville). The toolchain bundles its
+          # license as a plain text file at the SGDK tree root.
+          # SGDK ships its license as `license.txt` (lowercase) at the
+          # repo root; the marsdev tarball doesn't include it, so we curl
+          # it from upstream. Fail loud if curl returns nothing useful —
+          # an empty/404 SGDK-MIT.txt is a license-compliance bug.
+          if [ -f "$BUNDLE/toolchain/sgdk/license.txt" ]; then
+            cp "$BUNDLE/toolchain/sgdk/license.txt"               "$BUNDLE/LICENSES/SGDK-MIT.txt"
+          else
+            curl -sSfL https://raw.githubusercontent.com/Stephane-D/SGDK/master/license.txt \
+              -o "$BUNDLE/LICENSES/SGDK-MIT.txt"
+          fi
+          if [ "$(wc -c < "$BUNDLE/LICENSES/SGDK-MIT.txt")" -lt 100 ]; then
+            echo "SGDK-MIT.txt looks bogus (too small)" >&2
+            exit 1
+          fi
+          # The m68k-elf cross-toolchain is GCC + binutils — GPL-3.0 (with
+          # the libgcc runtime exception). We're redistributing unmodified
+          # binaries from the upstream marsdev release.
+          curl -sSL https://www.gnu.org/licenses/gpl-3.0.txt \
+            -o "$BUNDLE/LICENSES/m68k-elf-toolchain-GPL3.txt" || true
 
           CORE_SHA=$(git -C vendor/clownmdemu-libretro rev-parse HEAD)
           cat > "$BUNDLE/LICENSES/README.txt" <<EOF
@@ -220,6 +305,25 @@ jobs:
              Vendored commit: ${CORE_SHA}
              Loaded at runtime via dlopen (RetroArch-style libretro core).
              Binary corresponds 1:1 to the source tree at the SHA above.
+          5. SGDK 2.x (toolchain/sgdk/, headers + libmd.a + tools)
+                                                — MIT  (SGDK-MIT.txt)
+             https://github.com/Stephane-D/SGDK
+             Shipped via the andwn/marsdev v1.0.0-rc1 release. Used by the
+             example project's Build task (make -f \$GDK/makefile.gen).
+          6. m68k-elf cross-toolchain (toolchain/sgdk/bin/m68k-elf-*,
+             toolchain/sgdk/m68k-elf/, toolchain/sgdk/lib/, toolchain/sgdk/libexec/)
+                                                — GPL-3.0  (m68k-elf-toolchain-GPL3.txt)
+             GCC 13.1.0 + binutils, with the GCC Runtime Library Exception
+             for libgcc — code linked through libgcc into your ROM stays
+             unencumbered. Source: https://gcc.gnu.org/, https://www.gnu.org/software/binutils/
+             Redistributed unmodified from the andwn/marsdev v1.0.0-rc1
+             release: https://github.com/andwn/marsdev/releases/tag/v1.0.0-rc1
+          7. OpenJDK 21 minimal runtime (toolchain/jre/)
+                                                — GPL-2.0 with Classpath Exception
+             jlink-stripped subset of Eclipse Temurin / Ubuntu OpenJDK 21
+             (java.base + java.desktop + java.logging + java.xml). Needed by
+             rescomp.jar / sizebnd.jar / xgmtool. Source:
+             https://openjdk.org/projects/jdk/21/
           EOF
 
           # 6. start.sh + README.txt.
@@ -227,9 +331,28 @@ jobs:
           #!/usr/bin/env bash
           set -euo pipefail
           HERE="$(cd "$(dirname "$0")" && pwd)"
+
+          # Bundle binaries (mds-mcp, dump_vram, clownmdemu core)
           export MDS_MCP="$HERE/bin/mds-mcp"
           export MDS_CORE="$HERE/bin/clownmdemu_libretro.so"
           export PATH="$HERE/bin:$PATH"
+
+          # SGDK + m68k-elf toolchain — used by the example's Build task.
+          # The toolchain ships SGDK at toolchain/sgdk/ with m68k-elf-*
+          # cross binaries inside toolchain/sgdk/bin/. The minimal JRE under
+          # toolchain/jre/ powers rescomp.jar / sizebnd.jar / xgmtool.
+          if [ -d "$HERE/toolchain/sgdk" ]; then
+              export GDK="$HERE/toolchain/sgdk"
+              # SGDK's makefile.gen also accepts MARSDEV pointing at the
+              # toolchain root in some configurations — set it for parity.
+              export MARSDEV="$HERE/toolchain"
+              export PATH="$HERE/toolchain/sgdk/bin:$PATH"
+          fi
+          if [ -d "$HERE/toolchain/jre" ]; then
+              export JAVA_HOME="$HERE/toolchain/jre"
+              export PATH="$HERE/toolchain/jre/bin:$PATH"
+          fi
+
           if [ "$#" -gt 0 ] && [ -e "$1" ]; then
               OPEN_PATH="$1"
               shift
@@ -261,26 +384,38 @@ jobs:
           The example workspace ships with a prebuilt ROM at
           examples/hello-world/out/rom.bin so the Sega activity bar
           (VRAM/CRAM/sprites/regs/breakpoints) lights up immediately.
+          Hit Ctrl+Shift+B to rebuild the ROM natively — the bundle
+          ships SGDK 2.x + m68k-elf cross-toolchain + a minimal JRE,
+          NO Docker needed, NO apt installs, NO toolchain hunt.
           See examples/hello-world/README.md for the 5-step quickstart.
 
           To open a different folder:  ./start.sh /path/to/project
 
           Layout:
-            start.sh                          launcher
+            start.sh                          launcher (sets GDK, MARSDEV, PATH)
             code/                             private VSCodium
             data/extensions/                  pre-installed extensions
             data/user/                        isolated editor settings
             bin/mds-mcp                       MCP server (on \$PATH inside)
             bin/dump_vram                     headless VRAM dump
             bin/clownmdemu_libretro.so        libretro core (AGPL)
+            toolchain/sgdk/                   SGDK 2.x tree + m68k-elf-gcc cross
+                                              (\$GDK points here at runtime)
+            toolchain/jre/                    minimal JRE 21 for rescomp/sizebnd
             examples/rom.bin                  standalone sample ROM
             examples/hello-world/             default workspace (homebrew skeleton)
               ├── src/main.c                  SGDK 2.x source
               ├── res/                        SGDK rescomp inputs
               ├── out/rom.bin                 prebuilt ROM, ready to load
-              ├── Makefile                    SGDK passthrough
-              └── .vscode/                    tasks (Docker SGDK build), settings
+              ├── Makefile                    SGDK passthrough (bundle-aware)
+              └── .vscode/                    Build/Debug tasks (native, no Docker)
             LICENSES/                         third-party license texts
+
+          Working from a system VS Code instead of start.sh? Source the
+          env first:
+            source <(./start.sh --print-env)   (not implemented yet — set
+            GDK=\$PWD/toolchain/sgdk and prepend toolchain/sgdk/bin +
+            toolchain/jre/bin to PATH manually).
 
           Some Microsoft-only extensions in the pack are not on
           OpenVSX (cpptools, claude-vscode); see LICENSES/README.txt
