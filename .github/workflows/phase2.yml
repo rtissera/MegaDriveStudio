@@ -143,6 +143,25 @@ jobs:
           ASAN_OPTIONS: detect_leaks=0
         run: cargo test --release -- --nocapture
 
+      - name: Build sample ROM (SGDK Docker)
+        run: |
+          docker run --rm \
+            --entrypoint /bin/bash \
+            --user "$(id -u):$(id -g)" \
+            -v "${{ github.workspace }}:/src" \
+            -w /src \
+            zerasul/sgdk:2.00 \
+            -c "make -f \$GDK/makefile.gen EXTRA_CFLAGS='-O2'"
+          cp out/rom.bin out/sample-rom.bin
+          ls -lh out/sample-rom.bin
+
+      - name: End-to-end MCP test (real ROM)
+        working-directory: mds-mcp
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+          MDS_E2E_ROM: ${{ github.workspace }}/out/sample-rom.bin
+        run: cargo test --release --test e2e -- --nocapture --ignored
+
       - name: MCP smoke test (initialize + tools/list + resources/list)
         working-directory: mds-mcp
         run: |
