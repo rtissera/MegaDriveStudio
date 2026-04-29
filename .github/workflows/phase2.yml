@@ -212,8 +212,10 @@ jobs:
             echo '{"jsonrpc":"2.0","method":"notifications/initialized"}'
             echo '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"mega_get_status","arguments":{}}}'
           ) | timeout 5 ./target/release/mds-mcp --target edpro 2>/dev/null | tee /tmp/edpro.out
-          grep -q '"target":"edpro"' /tmp/edpro.out
-          grep -q '"connected":false' /tmp/edpro.out
+          # Status text comes back JSON-escaped inside the MCP response
+          # ("text":"{\"target\":\"edpro\",...}"), so grep the escaped form.
+          grep -q 'target\\":\\"edpro' /tmp/edpro.out
+          grep -q 'connected\\":false' /tmp/edpro.out
           echo "ED Pro target stub OK"
 
       - name: Upload mds-mcp binary
