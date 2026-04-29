@@ -186,6 +186,14 @@ jobs:
           cp out/rom.bin "$BUNDLE/examples/rom.bin" || \
             echo "(no out/rom.bin — bundle ships without examples/rom.bin)"
 
+          # 4b. Example project (so VSCodium opens onto a real homebrew
+          #     project, not a blank editor). Copies the in-repo skeleton
+          #     and overwrites the committed prebuilt ROM with the
+          #     freshly-built one from step 4.
+          cp -r examples/hello-world "$BUNDLE/examples/hello-world"
+          mkdir -p "$BUNDLE/examples/hello-world/out"
+          cp out/rom.bin "$BUNDLE/examples/hello-world/out/rom.bin" || true
+
           # 5. Licenses.
           cp mds-mcp/LICENSE                                       "$BUNDLE/LICENSES/MDS-MIT.txt"
           cp "$BUNDLE/code/resources/app/LICENSE.txt"              "$BUNDLE/LICENSES/VSCodium-MIT.txt"
@@ -225,6 +233,11 @@ jobs:
           if [ "$#" -gt 0 ] && [ -e "$1" ]; then
               OPEN_PATH="$1"
               shift
+          elif [ -d "$HERE/examples/hello-world" ]; then
+              # Default: open the turnkey example project so the user
+              # lands in a real homebrew workspace with a prebuilt ROM
+              # at examples/hello-world/out/rom.bin.
+              OPEN_PATH="$HERE/examples/hello-world"
           else
               OPEN_PATH="$HERE"
           fi
@@ -242,20 +255,32 @@ jobs:
 
           Run:    ./start.sh
           That's it. A private VSCodium with the Megadrive Studio
-          extensions opens; nothing is installed system-wide.
+          extensions opens onto the turnkey example project at
+          examples/hello-world/. Nothing is installed system-wide.
 
-          To open a project folder:    ./start.sh /path/to/project
+          The example workspace ships with a prebuilt ROM at
+          examples/hello-world/out/rom.bin so the Sega activity bar
+          (VRAM/CRAM/sprites/regs/breakpoints) lights up immediately.
+          See examples/hello-world/README.md for the 5-step quickstart.
+
+          To open a different folder:  ./start.sh /path/to/project
 
           Layout:
-            start.sh                      launcher
-            code/                         private VSCodium
-            data/extensions/              pre-installed extensions
-            data/user/                    isolated editor settings
-            bin/mds-mcp                   MCP server (on \$PATH inside)
-            bin/dump_vram                 headless VRAM dump
-            bin/clownmdemu_libretro.so    libretro core (AGPL)
-            examples/rom.bin              sample ROM from this release
-            LICENSES/                     third-party license texts
+            start.sh                          launcher
+            code/                             private VSCodium
+            data/extensions/                  pre-installed extensions
+            data/user/                        isolated editor settings
+            bin/mds-mcp                       MCP server (on \$PATH inside)
+            bin/dump_vram                     headless VRAM dump
+            bin/clownmdemu_libretro.so        libretro core (AGPL)
+            examples/rom.bin                  standalone sample ROM
+            examples/hello-world/             default workspace (homebrew skeleton)
+              ├── src/main.c                  SGDK 2.x source
+              ├── res/                        SGDK rescomp inputs
+              ├── out/rom.bin                 prebuilt ROM, ready to load
+              ├── Makefile                    SGDK passthrough
+              └── .vscode/                    tasks (Docker SGDK build), settings
+            LICENSES/                         third-party license texts
 
           Some Microsoft-only extensions in the pack are not on
           OpenVSX (cpptools, claude-vscode); see LICENSES/README.txt

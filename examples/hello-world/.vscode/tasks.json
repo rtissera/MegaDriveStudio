@@ -1,0 +1,105 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build ROM (Docker SGDK)",
+      "type": "shell",
+      "command": "docker",
+      "args": [
+        "run", "--rm",
+        "--entrypoint", "/bin/bash",
+        "--user", "${env:UID}:${env:GID}",
+        "-v", "${workspaceFolder}:/src",
+        "-w", "/src",
+        "zerasul/sgdk:2.00",
+        "-c", "make -f $GDK/makefile.gen EXTRA_CFLAGS=\"-O2\""
+      ],
+      "options": {
+        "env": {
+          "UID": "1000",
+          "GID": "1000"
+        }
+      },
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": {
+        "owner": "sgdk",
+        "fileLocation": ["relative", "${workspaceFolder}"],
+        "pattern": [
+          {
+            "regexp": "^(.*?):(\\d+):(\\d+):\\s+(warning|error|fatal error|note):\\s+(.*)$",
+            "file": 1,
+            "line": 2,
+            "column": 3,
+            "severity": 4,
+            "message": 5
+          }
+        ]
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      },
+      "detail": "Build the example ROM via the zerasul/sgdk:2.00 Docker image. Requires Docker (https://docs.docker.com/get-docker/). Output: out/rom.bin"
+    },
+    {
+      "label": "Build ROM (Debug, Docker SGDK)",
+      "type": "shell",
+      "command": "docker",
+      "args": [
+        "run", "--rm",
+        "--entrypoint", "/bin/bash",
+        "--user", "${env:UID}:${env:GID}",
+        "-v", "${workspaceFolder}:/src",
+        "-w", "/src",
+        "zerasul/sgdk:2.00",
+        "-c", "make -f $GDK/makefile.gen EXTRA_DEF=\"-DDEBUG\" EXTRA_CFLAGS=\"-g -gdwarf-4 -O0\""
+      ],
+      "options": {
+        "env": { "UID": "1000", "GID": "1000" }
+      },
+      "group": "build",
+      "problemMatcher": {
+        "owner": "sgdk",
+        "fileLocation": ["relative", "${workspaceFolder}"],
+        "pattern": [
+          {
+            "regexp": "^(.*?):(\\d+):(\\d+):\\s+(warning|error|fatal error|note):\\s+(.*)$",
+            "file": 1, "line": 2, "column": 3, "severity": 4, "message": 5
+          }
+        ]
+      },
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true },
+      "detail": "Build a debug ROM with DWARF-4 symbols. Requires Docker."
+    },
+    {
+      "label": "Clean",
+      "type": "shell",
+      "command": "docker",
+      "args": [
+        "run", "--rm",
+        "--entrypoint", "/bin/bash",
+        "--user", "${env:UID}:${env:GID}",
+        "-v", "${workspaceFolder}:/src",
+        "-w", "/src",
+        "zerasul/sgdk:2.00",
+        "-c", "make -f $GDK/makefile.gen clean || true; rm -f out/*.bin out/*.elf out/*.map"
+      ],
+      "options": {
+        "env": { "UID": "1000", "GID": "1000" }
+      },
+      "presentation": { "reveal": "silent" },
+      "detail": "Remove build artifacts."
+    },
+    {
+      "label": "Show Load ROM hint",
+      "type": "shell",
+      "command": "echo",
+      "args": [
+        "Open the Sega activity bar (left sidebar). The MCP server (mds-mcp) auto-spawns on extension activation. Use the mega_load_rom MCP tool from your client (Claude / VS Code MCP integration) and point it at out/rom.bin — VRAM/CRAM/sprites/regs panes will populate."
+      ],
+      "presentation": { "reveal": "always", "panel": "shared" },
+      "detail": "Reminder: how to load the bundled ROM into the live debug views."
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "//": "Megadrive Studio — hello-world example workspace settings.",
+  "//mdsMcpBinary": "Bundle-relative path. When this folder is opened from inside the Linux bundle (./start.sh), bin/mds-mcp lives two levels up. When opened OUTSIDE the bundle, override mdsMcpBinary in your User settings (or unset it to fall back to PATH / $workspace/mds-mcp/target/release/mds-mcp).",
+
+  "megadriveStudio.mcpAutoSpawn": true,
+  "megadriveStudio.mdsMcpBinary": "${workspaceFolder}/../../bin/mds-mcp",
+  "megadriveStudio.mcpServer": "sse://127.0.0.1:28765",
+
+  "files.associations": {
+    "*.s": "asm",
+    "*.68k": "asm",
+    "*.res": "plaintext"
+  },
+
+  "files.exclude": {
+    "**/*.o": true,
+    "**/*.d": true,
+    "**/*.elf": true,
+    "**/*.map": true
+  }
+}

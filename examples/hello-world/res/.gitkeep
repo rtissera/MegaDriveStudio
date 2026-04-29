@@ -1,0 +1,8 @@
+# Dossier ressources SGDK
+# Mets ici tes fichiers .png, .vgm, .wav, .tff, etc.
+# rescomp les convertira en C/binaire au moment du build.
+# Exemple de fichier .res :
+#
+#   PALETTE bg_pal   "gfx/background.png"
+#   IMAGE   bg_img   "gfx/background.png"    NONE
+#   SOUND   bgm      "sfx/music.vgm"         XGM2

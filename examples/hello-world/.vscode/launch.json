@@ -1,0 +1,5 @@
+{
+  "//": "Most debug interactions go through the Megadrive Studio extension's Sega activity bar (driven by mds-mcp), not VS Code's DAP. This stub is a placeholder for future GDB-stub-based debugging (BlastEm pipe / EDPro hardware stub). Pressing F5 in this workspace runs the extension's `megadriveStudio.continue` command, not a launch config.",
+  "version": "0.2.0",
+  "configurations": []
+}

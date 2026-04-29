@@ -6,6 +6,12 @@ out/
 *.map
 *.bin
 
+# Exception: the hello-world example ships a committed prebuilt ROM so the
+# Linux bundle works out-of-the-box without Docker. CI overwrites this with
+# the freshly-built ROM at release time.
+!examples/hello-world/out/
+!examples/hello-world/out/rom.bin
+
 # Logs debug
 /tmp/kdebug-*.log
 /tmp/gdb-proxy.pid
