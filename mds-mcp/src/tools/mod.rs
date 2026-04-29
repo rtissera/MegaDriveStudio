@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
-//! MCP tool surface — 22 tools covering control / memory / vdp / cpu /
-//! state / breakpoints. Tools whose backing core feature isn't ready yet
-//! return a structured `not_implemented` / `debug_api_unavailable` payload
-//! rather than failing the call.
+//! MCP tool surface — 26 tools covering control / memory / vdp / cpu /
+//! state / breakpoints / input. Tools whose backing core feature isn't ready
+//! yet return a structured `not_implemented` / `debug_api_unavailable`
+//! payload rather than failing the call.
 
 #![allow(dead_code)]
 
@@ -13,7 +13,9 @@ use rmcp::{
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-use crate::emulator::{breakpoints::BpKind, breakpoints::BpSpace, decode, frame as fbuf, MemorySpace};
+use crate::emulator::{
+    breakpoints::BpKind, breakpoints::BpSpace, decode, frame as fbuf, input::Button, MemorySpace,
+};
 use crate::server::MdsServer;
 use crate::target::{TargetKind, NOT_SUPPORTED};
 
@@ -87,6 +89,68 @@ pub struct ScreenshotArgs {
 pub struct StateSlotArgs {
     #[serde(default)]
     pub slot: Option<u32>,
+}
+
+/// Partial joypad state — every field optional. `None` means "leave that
+/// button untouched"; `Some(true|false)` flips it.
+#[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
+pub struct InputButtons {
+    #[serde(default)] pub up: Option<bool>,
+    #[serde(default)] pub down: Option<bool>,
+    #[serde(default)] pub left: Option<bool>,
+    #[serde(default)] pub right: Option<bool>,
+    #[serde(default)] pub a: Option<bool>,
+    #[serde(default)] pub b: Option<bool>,
+    #[serde(default)] pub c: Option<bool>,
+    #[serde(default)] pub start: Option<bool>,
+    #[serde(default)] pub x: Option<bool>,
+    #[serde(default)] pub y: Option<bool>,
+    #[serde(default)] pub z: Option<bool>,
+    #[serde(default)] pub mode: Option<bool>,
+}
+
+impl InputButtons {
+    fn into_pairs(self) -> Vec<(Button, bool)> {
+        let mut v = Vec::new();
+        macro_rules! push { ($f:ident, $b:expr) => { if let Some(p) = self.$f { v.push(($b, p)); } }; }
+        push!(up, Button::Up);
+        push!(down, Button::Down);
+        push!(left, Button::Left);
+        push!(right, Button::Right);
+        push!(a, Button::A);
+        push!(b, Button::B);
+        push!(c, Button::C);
+        push!(start, Button::Start);
+        push!(x, Button::X);
+        push!(y, Button::Y);
+        push!(z, Button::Z);
+        push!(mode, Button::Mode);
+        v
+    }
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
+pub struct InputSetStateArgs {
+    /// Joypad port 0 or 1 (default 0).
+    #[serde(default)]
+    pub port: Option<u32>,
+    /// Partial set of buttons to flip. Buttons not listed are left alone.
+    #[serde(default)]
+    pub buttons: InputButtons,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct InputButtonArgs {
+    #[serde(default)]
+    pub port: Option<u32>,
+    /// One of "up"|"down"|"left"|"right"|"a"|"b"|"c"|"start"|"x"|"y"|"z"|"mode".
+    pub button: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
+pub struct InputGetStateArgs {
+    #[serde(default)]
+    pub port: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -549,5 +613,62 @@ impl MdsServer {
             })),
             Err(e) => err_text(format!("status failed: {e}")),
         })
+    }
+
+    #[tool(description = "Set joypad button state on a port (0 or 1, default 0). `buttons` is a partial map — only listed buttons flip; the rest stay as they were. Buttons: up,down,left,right,a,b,c,start,x,y,z,mode (6-button pad).")]
+    async fn mega_input_set_state(
+        &self,
+        Parameters(args): Parameters<InputSetStateArgs>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(r) = self.block_on_edpro("mega_input_set_state") { return Ok(r); }
+        let port = args.port.unwrap_or(0);
+        let pairs = args.buttons.into_pairs();
+        self.actor().input().apply_partial(port, &pairs);
+        Ok(ok_json(serde_json::json!({"ok": true, "port": port, "applied": pairs.len()})))
+    }
+
+    #[tool(description = "Press a single joypad button (sets pressed=true). Pair with `mega_input_release` or `mega_input_set_state` to release. Buttons: up,down,left,right,a,b,c,start,x,y,z,mode.")]
+    async fn mega_input_press(
+        &self,
+        Parameters(args): Parameters<InputButtonArgs>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(r) = self.block_on_edpro("mega_input_press") { return Ok(r); }
+        let port = args.port.unwrap_or(0);
+        let Some(b) = Button::parse(&args.button) else {
+            return Ok(err_text(format!("unknown button: {:?}", args.button)));
+        };
+        self.actor().input().press(port, b);
+        Ok(ok_json(serde_json::json!({"ok": true, "port": port, "button": b.name()})))
+    }
+
+    #[tool(description = "Release a single joypad button (sets pressed=false).")]
+    async fn mega_input_release(
+        &self,
+        Parameters(args): Parameters<InputButtonArgs>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(r) = self.block_on_edpro("mega_input_release") { return Ok(r); }
+        let port = args.port.unwrap_or(0);
+        let Some(b) = Button::parse(&args.button) else {
+            return Ok(err_text(format!("unknown button: {:?}", args.button)));
+        };
+        self.actor().input().release(port, b);
+        Ok(ok_json(serde_json::json!({"ok": true, "port": port, "button": b.name()})))
+    }
+
+    #[tool(description = "Get the current joypad state for a port (default 0). Returns {port, buttons:{up,down,...,mode}}.")]
+    async fn mega_input_get_state(
+        &self,
+        Parameters(args): Parameters<InputGetStateArgs>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(r) = self.block_on_edpro("mega_input_get_state") { return Ok(r); }
+        let port = args.port.unwrap_or(0);
+        let map: serde_json::Map<String, serde_json::Value> = self
+            .actor()
+            .input()
+            .snapshot_buttons(port)
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), serde_json::Value::Bool(v)))
+            .collect();
+        Ok(ok_json(serde_json::json!({"port": port, "buttons": map})))
     }
 }

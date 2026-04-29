@@ -10,6 +10,7 @@ pub mod breakpoints;
 pub mod debug_api;
 pub mod decode;
 pub mod frame;
+pub mod input;
 pub mod memory;
 pub mod runner;
 
@@ -20,6 +21,7 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 pub use breakpoints::{BpKind, BpSpace, Breakpoint, SharedBreakpoints};
+pub use input::InputState;
 pub use memory::MemorySpace;
 
 /// Information returned by `mega_load_rom`.
@@ -165,6 +167,9 @@ pub struct EmulatorActor {
     /// thread on construction; the MCP layer also clones it to render the
     /// `mega://breakpoints` resource without round-tripping the actor.
     breakpoints: SharedBreakpoints,
+    /// Shared joypad state (two ports). Mutated by the MCP layer, read by
+    /// the libra `input_state` callback installed by the runner thread.
+    input: InputState,
 }
 
 impl EmulatorActor {
@@ -179,24 +184,34 @@ impl EmulatorActor {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Command>();
         let (bcast_tx, _) = broadcast::channel::<ResourceEvent>(128);
         let breakpoints = SharedBreakpoints::new();
+        let input = InputState::new();
         let bcast_clone = bcast_tx.clone();
         let bp_clone = breakpoints.clone();
+        let input_clone = input.clone();
         std::thread::Builder::new()
             .name("mds-emu".into())
             .spawn(move || {
-                runner::run(core_path, cmd_rx, bcast_clone, bp_clone);
+                runner::run(core_path, cmd_rx, bcast_clone, bp_clone, input_clone);
             })
             .expect("spawn emulator thread");
         Self {
             cmd_tx,
             bcast_tx,
             breakpoints,
+            input,
         }
     }
 
     /// Snapshot of the current breakpoint table — cheap (one Arc clone).
     pub fn breakpoints(&self) -> SharedBreakpoints {
         self.breakpoints.clone()
+    }
+
+    /// Shared joypad state. Mutating methods (`press` / `release` /
+    /// `apply_partial`) are lock-free atomics; the libra input callback on
+    /// the emulator thread reads them inline.
+    pub fn input(&self) -> &InputState {
+        &self.input
     }
 
     #[allow(dead_code)] // wired up to MCP resources/subscribe in M3

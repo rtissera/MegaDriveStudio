@@ -34,10 +34,10 @@ async fn subscribe_and_stay_responsive() {
         .await;
     assert!(bad.get("error").is_some(), "bad subscribe should error, got {bad}");
 
-    // Server still responsive: resources/list returns 9 entries.
+    // Server still responsive: resources/list returns 10 entries (M5).
     let list: Value = c.rpc(4, "resources/list", json!({})).await;
     let arr = list["result"]["resources"].as_array().expect("resources");
-    assert_eq!(arr.len(), 9);
+    assert_eq!(arr.len(), 10);
 
     let _ = c.child.kill().await;
 }

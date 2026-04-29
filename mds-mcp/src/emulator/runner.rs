@@ -18,6 +18,7 @@ use super::decode;
 use super::frame::{self, FrameSlot};
 #[cfg(libra_present)]
 use super::frame::PixelFormat;
+use super::input::InputState;
 use super::memory;
 use super::{Command, MemorySpace, ResourceEvent, RomInfo, SetBpOutcome, Status, StepOutcome};
 use crate::ffi;
@@ -25,13 +26,19 @@ use crate::ffi;
 const FRAME_DURATION: Duration = Duration::from_micros(16_667);
 
 #[cfg(libra_present)]
+struct CallbackCtx {
+    frame_slot: FrameSlot,
+    input: InputState,
+}
+
+#[cfg(libra_present)]
 struct LibraCtx {
     raw: *mut ffi::libra_ctx,
     core_loaded: bool,
-    /// Heap-allocated frame slot whose pointer is handed to libra as `userdata`
-    /// and dereferenced from the C video callback. Held in a `Box` so the
-    /// pointer is stable for libra's lifetime.
-    frame_slot: Box<FrameSlot>,
+    /// Heap-allocated callback context whose pointer is handed to libra as
+    /// `userdata` and dereferenced from the C video / input_state callbacks.
+    /// Held in a `Box` so the pointer is stable for libra's lifetime.
+    cb_ctx: Box<CallbackCtx>,
     /// Debug API function-pointer table (memory ID 0x109). Installed lazily
     /// after `libra_load_game` once the core actually exposes it.
     debug_api: Option<*const ffi::LibraMdDebugApi>,
@@ -56,25 +63,52 @@ unsafe extern "C" fn video_cb_trampoline(
     let Some(fmt) = PixelFormat::from_libretro(pixel_format) else {
         return;
     };
-    let slot: &FrameSlot = unsafe { &*(ud as *const FrameSlot) };
+    let ctx: &CallbackCtx = unsafe { &*(ud as *const CallbackCtx) };
     let total = pitch.saturating_mul(h as usize);
     if total == 0 {
         return;
     }
     let bytes = unsafe { std::slice::from_raw_parts(data as *const u8, total) };
-    slot.store(w, h, pitch, fmt, bytes, 0);
+    ctx.frame_slot.store(w, h, pitch, fmt, bytes, 0);
+}
+
+#[cfg(libra_present)]
+unsafe extern "C" fn input_state_cb_trampoline(
+    ud: *mut std::ffi::c_void,
+    port: std::ffi::c_uint,
+    device: std::ffi::c_uint,
+    _index: std::ffi::c_uint,
+    id: std::ffi::c_uint,
+) -> i16 {
+    // RETRO_DEVICE_JOYPAD == 1. We only respond to the joypad device — analog
+    // / mouse / lightgun ids fall through and return 0 ("no input").
+    if ud.is_null() || device != 1 {
+        return 0;
+    }
+    let ctx: &CallbackCtx = unsafe { &*(ud as *const CallbackCtx) };
+    ctx.input.read_libretro(port, id)
+}
+
+#[cfg(libra_present)]
+unsafe extern "C" fn input_poll_cb_trampoline(_ud: *mut std::ffi::c_void) {
+    // No-op: state is updated lock-free by the MCP layer between core polls.
 }
 
 #[cfg(libra_present)]
 impl LibraCtx {
-    fn new() -> Option<Self> {
+    fn new(input: InputState) -> Option<Self> {
         // NULL audio specifically dodges the libra audio-resampler
         // heap-corruption bug while the parallel agent finishes the patch.
         let mut cfg: ffi::libra_config_t = unsafe { std::mem::zeroed() };
         cfg.audio_output_rate = 48_000;
-        let frame_slot = Box::new(FrameSlot::new());
+        let cb_ctx = Box::new(CallbackCtx {
+            frame_slot: FrameSlot::new(),
+            input,
+        });
         cfg.video = Some(video_cb_trampoline);
-        cfg.userdata = (&*frame_slot as *const FrameSlot) as *mut std::ffi::c_void;
+        cfg.input_state = Some(input_state_cb_trampoline);
+        cfg.input_poll = Some(input_poll_cb_trampoline);
+        cfg.userdata = (&*cb_ctx as *const CallbackCtx) as *mut std::ffi::c_void;
         let raw = unsafe { ffi::libra_create(&cfg as *const _) };
         if raw.is_null() {
             return None;
@@ -82,13 +116,13 @@ impl LibraCtx {
         Some(Self {
             raw,
             core_loaded: false,
-            frame_slot,
+            cb_ctx,
             debug_api: None,
             debug_ctx: None,
         })
     }
     fn frame_slot(&self) -> &FrameSlot {
-        &self.frame_slot
+        &self.cb_ctx.frame_slot
     }
 
     fn load_core(&mut self, path: &str) -> bool {
@@ -185,15 +219,18 @@ struct LibraCtx {
     raw: *mut ffi::libra_ctx,
     core_loaded: bool,
     frame_slot: Box<FrameSlot>,
+    #[allow(dead_code)]
+    input: InputState,
 }
 
 #[cfg(not(libra_present))]
 impl LibraCtx {
-    fn new() -> Option<Self> {
+    fn new(input: InputState) -> Option<Self> {
         Some(Self {
             raw: std::ptr::null_mut(),
             core_loaded: false,
             frame_slot: Box::new(FrameSlot::new()),
+            input,
         })
     }
     fn load_core(&mut self, _: &str) -> bool {
@@ -248,9 +285,9 @@ struct State {
 }
 
 impl State {
-    fn new(core_path: PathBuf, breakpoints: SharedBreakpoints) -> Self {
+    fn new(core_path: PathBuf, breakpoints: SharedBreakpoints, input: InputState) -> Self {
         Self {
-            libra: LibraCtx::new().expect("libra_create returned null"),
+            libra: LibraCtx::new(input).expect("libra_create returned null"),
             core_path,
             rom_path: None,
             rom_bytes: None,
@@ -275,8 +312,9 @@ pub fn run(
     mut cmd_rx: mpsc::UnboundedReceiver<Command>,
     bcast: broadcast::Sender<ResourceEvent>,
     breakpoints: SharedBreakpoints,
+    input: InputState,
 ) {
-    let mut state = State::new(core_path, breakpoints);
+    let mut state = State::new(core_path, breakpoints, input);
     let mut next_frame = Instant::now() + FRAME_DURATION;
 
     loop {

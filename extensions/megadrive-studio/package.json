@@ -26,6 +26,8 @@
   ],
   "activationEvents": [
     "workspaceContains:Makefile",
+    "onView:megadriveStudio.control",
+    "onView:megadriveStudio.screen",
     "onView:megadriveStudio.vram",
     "onView:megadriveStudio.cram",
     "onView:megadriveStudio.sprites",
@@ -40,7 +42,8 @@
     "onCommand:megadriveStudio.continue",
     "onCommand:megadriveStudio.clearAllBreakpoints",
     "onCommand:megadriveStudio.loadRom",
-    "onCommand:megadriveStudio.unloadRom"
+    "onCommand:megadriveStudio.unloadRom",
+    "onCommand:megadriveStudio.configureJoypad"
   ],
   "contributes": {
     "commands": [
@@ -135,6 +138,10 @@
       {
         "command": "megadriveStudio.resetEmu",
         "title": "Sega: Reset / Reload Last ROM"
+      },
+      {
+        "command": "megadriveStudio.configureJoypad",
+        "title": "Sega: Configure Joypad…"
       }
     ],
     "keybindings": [
@@ -238,6 +245,22 @@
         {
           "command": "megadriveStudio.unloadRom",
           "when": "workspaceFolderCount > 0"
+        },
+        {
+          "command": "megadriveStudio.pauseEmu",
+          "when": "workspaceFolderCount > 0"
+        },
+        {
+          "command": "megadriveStudio.resumeEmu",
+          "when": "workspaceFolderCount > 0"
+        },
+        {
+          "command": "megadriveStudio.resetEmu",
+          "when": "workspaceFolderCount > 0"
+        },
+        {
+          "command": "megadriveStudio.configureJoypad",
+          "when": "workspaceFolderCount > 0"
         }
       ],
       "view/item/context": [
@@ -268,11 +291,11 @@
         }
       ],
       "view/title": [
-        { "command": "megadriveStudio.loadRom",   "when": "view == megadriveStudio.vram", "group": "navigation@1" },
-        { "command": "megadriveStudio.unloadRom", "when": "view == megadriveStudio.vram", "group": "navigation@2" },
-        { "command": "megadriveStudio.pauseEmu",  "when": "view == megadriveStudio.vram", "group": "navigation@3" },
-        { "command": "megadriveStudio.resumeEmu", "when": "view == megadriveStudio.vram", "group": "navigation@4" },
-        { "command": "megadriveStudio.resetEmu",  "when": "view == megadriveStudio.vram", "group": "navigation@5" }
+        { "command": "megadriveStudio.loadRom",   "when": "view == megadriveStudio.control", "group": "navigation@1" },
+        { "command": "megadriveStudio.unloadRom", "when": "view == megadriveStudio.control", "group": "navigation@2" },
+        { "command": "megadriveStudio.pauseEmu",  "when": "view == megadriveStudio.control", "group": "navigation@3" },
+        { "command": "megadriveStudio.resumeEmu", "when": "view == megadriveStudio.control", "group": "navigation@4" },
+        { "command": "megadriveStudio.resetEmu",  "when": "view == megadriveStudio.control", "group": "navigation@5" }
       ]
     },
     "configuration": {
@@ -337,6 +360,15 @@
         }
       ],
       "megadrive-studio": [
+        {
+          "id": "megadriveStudio.control",
+          "name": "Control"
+        },
+        {
+          "id": "megadriveStudio.screen",
+          "type": "webview",
+          "name": "Live Screen"
+        },
         {
           "id": "megadriveStudio.vram",
           "type": "webview",

@@ -33,6 +33,8 @@ pub enum ResourceSource {
     Z80Json,
     /// Live breakpoint list (M4).
     BreakpointsJson,
+    /// Live joypad state (two ports).
+    InputJson,
 }
 
 pub const CATALOGUE: &[ResourceDef] = &[
@@ -98,6 +100,13 @@ pub const CATALOGUE: &[ResourceDef] = &[
         description: "Live list of registered breakpoints (id, addr, kind, space, hit_count, enabled).",
         mime_type: "application/json",
         source: ResourceSource::BreakpointsJson,
+    },
+    ResourceDef {
+        uri: "mega://input",
+        name: "Joypad input",
+        description: "Live joypad state for ports 0 and 1: {ports:[{port, buttons:{up,down,...,mode}}, ...]}.",
+        mime_type: "application/json",
+        source: ResourceSource::InputJson,
     },
 ];
 
@@ -237,6 +246,25 @@ pub async fn read_contents(
                 uri: def.uri.into(),
                 mime_type: Some(def.mime_type.into()),
                 text: serde_json::to_string(&snap.entries).unwrap_or_else(|_| "[]".into()),
+                meta: None,
+            }
+        }
+        ResourceSource::InputJson => {
+            let input = actor.input();
+            let ports: Vec<serde_json::Value> = (0u32..2)
+                .map(|p| {
+                    let buttons: serde_json::Map<String, serde_json::Value> = input
+                        .snapshot_buttons(p)
+                        .into_iter()
+                        .map(|(k, v)| (k.to_string(), serde_json::Value::Bool(v)))
+                        .collect();
+                    serde_json::json!({"port": p, "buttons": buttons})
+                })
+                .collect();
+            ResourceContents::TextResourceContents {
+                uri: def.uri.into(),
+                mime_type: Some(def.mime_type.into()),
+                text: serde_json::json!({"ports": ports}).to_string(),
                 meta: None,
             }
         }

@@ -21,8 +21,8 @@ async fn mcp_smoke() {
     let tools = c.rpc(2, "tools/list", json!({})).await;
     let arr = tools["result"]["tools"].as_array().expect("tools array");
     assert!(
-        arr.len() >= 22,
-        "expected ≥22 tools, got {}: {:?}",
+        arr.len() >= 26,
+        "expected ≥26 tools, got {}: {:?}",
         arr.len(),
         arr.iter().map(|t| t["name"].as_str()).collect::<Vec<_>>()
     );
@@ -50,14 +50,18 @@ async fn mcp_smoke() {
         "mega_save_state",
         "mega_load_state",
         "mega_get_status",
+        "mega_input_set_state",
+        "mega_input_press",
+        "mega_input_release",
+        "mega_input_get_state",
     ] {
         assert!(names.contains(&needed), "tool {needed} missing");
     }
 
-    // resources/list — 9 entries.
+    // resources/list — 10 entries (M5: + mega://input).
     let res = c.rpc(3, "resources/list", json!({})).await;
     let resources = res["result"]["resources"].as_array().expect("resources");
-    assert_eq!(resources.len(), 9, "expected 9 resources, got {}", resources.len());
+    assert_eq!(resources.len(), 10, "expected 10 resources, got {}", resources.len());
     let uris: Vec<&str> = resources.iter().filter_map(|r| r["uri"].as_str()).collect();
     for needed in [
         "mega://vram",
@@ -69,6 +73,7 @@ async fn mcp_smoke() {
         "mega://framebuffer",
         "mega://z80/registers",
         "mega://breakpoints",
+        "mega://input",
     ] {
         assert!(uris.contains(&needed), "resource {needed} missing");
     }
