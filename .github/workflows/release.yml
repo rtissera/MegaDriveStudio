@@ -1,6 +1,8 @@
 # =============================================================================
 # .github/workflows/release.yml
 # Release automatique sur tag vX.Y.Z
+# Bundles: sample ROM, VS Code extensions, mds-mcp Rust binary,
+# vendored libra + clownmdemu-libretro core, tools/dump_vram.
 # =============================================================================
 name: Release
 
@@ -19,15 +21,17 @@ jobs:
       contents: write
 
     steps:
-      - name: Checkout
+      - name: Checkout (recursive)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          submodules: recursive
 
       - name: Extract version from tag
         id: version
         run: echo "VERSION=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
 
+      # ── Sample ROM (SGDK) ───────────────────────────────────────────────────
       - name: Build release ROM
         run: |
           docker run --rm \
@@ -43,15 +47,62 @@ jobs:
                 EXTRA_CFLAGS='-O2' \
                 EXTRA_DEF='-DROM_VERSION=\\\"\$ROM_VERSION\\\"'
             "
-          # Rename avec version
           cp out/rom.bin "out/rom-${{ steps.version.outputs.VERSION }}.bin"
 
+      # ── Build deps ──────────────────────────────────────────────────────────
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build pkg-config \
+            clang libclang-dev
+
+      - name: Setup Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Setup Node 20 (for vsce)
-        if: hashFiles('extensions/megadrive-studio-pack/package.json', 'extensions/megadrive-studio/package.json') != ''
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
+      # ── Vendor: libra (static) + clownmdemu-libretro core ──────────────────
+      - name: Build clownmdemu_libretro.so
+        working-directory: vendor/clownmdemu-libretro
+        run: make -j"$(nproc)"
+
+      - name: Configure + build libra (static, tests off)
+        run: |
+          cmake -S vendor/libra -B vendor/libra/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DBUILD_TESTS=OFF \
+            -G Ninja
+          cmake --build vendor/libra/build -j"$(nproc)"
+
+      # ── mds-mcp Rust binary ─────────────────────────────────────────────────
+      - name: Build mds-mcp (release)
+        working-directory: mds-mcp
+        run: cargo build --release
+
+      - name: Stage mds-mcp binary with version suffix
+        run: |
+          mkdir -p dist
+          cp mds-mcp/target/release/mds-mcp \
+             "dist/mds-mcp-${{ steps.version.outputs.VERSION }}-linux-x64"
+          chmod +x "dist/mds-mcp-${{ steps.version.outputs.VERSION }}-linux-x64"
+
+      # ── tools/dump_vram (M0 utility) ────────────────────────────────────────
+      - name: Build dump_vram
+        working-directory: tools
+        run: make
+
+      - name: Stage dump_vram with version suffix
+        run: |
+          cp tools/dump_vram \
+             "dist/dump_vram-${{ steps.version.outputs.VERSION }}-linux-x64"
+          chmod +x "dist/dump_vram-${{ steps.version.outputs.VERSION }}-linux-x64"
+
+      # ── VS Code extensions ──────────────────────────────────────────────────
       - name: Build extension pack .vsix
         if: hashFiles('extensions/megadrive-studio-pack/package.json') != ''
         working-directory: extensions/megadrive-studio-pack
@@ -65,17 +116,77 @@ jobs:
           npm run compile
           npx -y @vscode/vsce@latest package --no-dependencies --allow-missing-repository
 
-      - name: Generate ROM info
+      # ── Stage vendored deps for download ────────────────────────────────────
+      - name: Stage vendored binaries
         run: |
-          SIZE=$(stat -c%s "out/rom-${{ steps.version.outputs.VERSION }}.bin")
-          echo "## ROM Info" >> release_notes.md
-          echo "" >> release_notes.md
-          echo "| | |" >> release_notes.md
-          echo "|---|---|" >> release_notes.md
-          echo "| Version | ${{ steps.version.outputs.VERSION }} |" >> release_notes.md
-          echo "| Size | $(echo "scale=1; $SIZE/1024" | bc) KB |" >> release_notes.md
-          echo "| SHA256 | \`$(sha256sum "out/rom-${{ steps.version.outputs.VERSION }}.bin" | cut -d' ' -f1)\` |" >> release_notes.md
-          echo "| Commit | \`${{ github.sha }}\` |" >> release_notes.md
+          cp vendor/clownmdemu-libretro/clownmdemu_libretro.so \
+             "dist/clownmdemu_libretro-${{ steps.version.outputs.VERSION }}-linux-x64.so"
+          cp vendor/libra/build/liblibra.a \
+             "dist/liblibra-${{ steps.version.outputs.VERSION }}-linux-x64.a"
+
+      # ── Release notes ───────────────────────────────────────────────────────
+      - name: Generate release notes
+        run: |
+          ROM="out/rom-${{ steps.version.outputs.VERSION }}.bin"
+          MCP="dist/mds-mcp-${{ steps.version.outputs.VERSION }}-linux-x64"
+          CORE="dist/clownmdemu_libretro-${{ steps.version.outputs.VERSION }}-linux-x64.so"
+          LIBRA_SHA=$(git -C vendor/libra rev-parse --short HEAD)
+          CORE_SHA=$(git -C vendor/clownmdemu-libretro rev-parse --short HEAD)
+
+          {
+            echo "# Megadrive Studio ${{ steps.version.outputs.VERSION }}"
+            echo
+            echo "## Artifacts"
+            echo
+            echo "| File | Size | SHA256 |"
+            echo "|---|---|---|"
+            for f in "$ROM" "$MCP" "$CORE" \
+                     dist/dump_vram-*-linux-x64 \
+                     dist/liblibra-*-linux-x64.a \
+                     extensions/megadrive-studio-pack/*.vsix \
+                     extensions/megadrive-studio/*.vsix; do
+              [ -f "$f" ] || continue
+              SIZE=$(stat -c%s "$f")
+              KB=$(echo "scale=1; $SIZE/1024" | bc)
+              SHA=$(sha256sum "$f" | cut -d' ' -f1)
+              NAME=$(basename "$f")
+              echo "| \`$NAME\` | ${KB} KB | \`${SHA}\` |"
+            done
+            echo
+            echo "## Vendored components"
+            echo
+            echo "- \`libra\` @ \`$LIBRA_SHA\` (rtissera/libra, MIT)"
+            echo "- \`clownmdemu-libretro\` @ \`$CORE_SHA\` (rtissera/clownmdemu-libretro, AGPL-3.0 — fork of Clownacy/clownmdemu-libretro with custom retro_get_memory_data IDs)"
+            echo
+            echo "## How to test"
+            echo
+            echo "### VS Code IDE"
+            echo "\`\`\`"
+            echo "code --install-extension megadrive-studio-pack-*.vsix"
+            echo "code --install-extension megadrive-studio-*.vsix"
+            echo "\`\`\`"
+            echo "Then open any folder in VS Code and look for the **Sega** activity bar icon."
+            echo
+            echo "### MCP server (standalone)"
+            echo "\`\`\`"
+            echo "chmod +x mds-mcp-*-linux-x64"
+            echo "./mds-mcp-*-linux-x64 --help"
+            echo "./mds-mcp-*-linux-x64 --sse 28765 --core ./clownmdemu_libretro-*-linux-x64.so"
+            echo "\`\`\`"
+            echo "Then point Claude Desktop or any MCP client at \`sse://127.0.0.1:28765\`."
+            echo
+            echo "### M0 spike (headless VRAM dump)"
+            echo "\`\`\`"
+            echo "chmod +x dump_vram-*-linux-x64"
+            echo "./dump_vram-*-linux-x64 path/to/rom.bin vram.bin"
+            echo "\`\`\`"
+            echo
+            echo "## Build provenance"
+            echo
+            echo "- Tag: \`${{ steps.version.outputs.VERSION }}\`"
+            echo "- Commit: \`${{ github.sha }}\`"
+            echo "- Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          } > release_notes.md
           cat release_notes.md
 
       - name: Create GitHub Release
@@ -87,6 +198,10 @@ jobs:
           prerelease: ${{ contains(steps.version.outputs.VERSION, '-') }}
           files: |
             out/rom-${{ steps.version.outputs.VERSION }}.bin
+            dist/mds-mcp-${{ steps.version.outputs.VERSION }}-linux-x64
+            dist/dump_vram-${{ steps.version.outputs.VERSION }}-linux-x64
+            dist/clownmdemu_libretro-${{ steps.version.outputs.VERSION }}-linux-x64.so
+            dist/liblibra-${{ steps.version.outputs.VERSION }}-linux-x64.a
             extensions/megadrive-studio-pack/*.vsix
             extensions/megadrive-studio/*.vsix
           fail_on_unmatched_files: false

@@ -2,7 +2,7 @@
   "name": "megadrive-studio-pack",
   "displayName": "Megadrive Studio (Extension Pack)",
   "description": "One-click setup of all VS Code extensions for Sega Mega Drive / Genesis homebrew development with SGDK, MARSDEV, BlastEm, ClownMDEmu, and Mega Everdrive Pro.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "megadrive-studio",
   "license": "MIT",
   "engines": {

@@ -2,7 +2,7 @@
   "name": "megadrive-studio",
   "displayName": "Megadrive Studio",
   "description": "Sega Mega Drive / Genesis homebrew dev IDE for VS Code (SGDK + BlastEm + ClownMDEmu + Mega Everdrive Pro).",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "megadrive-studio",
   "license": "MIT",
   "engines": {
