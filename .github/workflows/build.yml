@@ -91,6 +91,8 @@ jobs:
           sudo apt-get install -y --no-install-recommends blastem xvfb
 
       - name: Smoke test (run 5s headless)
+        env:
+          SDL_AUDIODRIVER: dummy
         run: |
           # Lance BlastEm avec Xvfb pendant 5 secondes
           # Vérifie qu'il ne crashe pas immédiatement
