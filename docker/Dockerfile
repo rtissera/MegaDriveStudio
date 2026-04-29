@@ -19,12 +19,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
 ENV PATH="/root/.cargo/bin:$PATH"
 
-# BlastEm
-RUN git clone --depth=1 https://github.com/libretro/blastem /opt/blastem-src \
-    && cd /opt/blastem-src \
-    && make -j$(nproc) CFLAGS="-O2" \
-    && cp blastem /usr/local/bin/ \
-    && rm -rf /opt/blastem-src
+# BlastEm — repo officiel Mercurial (Michael Pavone)
+RUN apt-get install -y --no-install-recommends mercurial && \
+    hg clone https://www.retrodev.com/repos/blastem /opt/blastem-src && \
+    cd /opt/blastem-src && \
+    make -j$(nproc) CFLAGS="-O2" CPU_FLAGS="" && \
+    cp blastem /usr/local/bin/ && \
+    rm -rf /opt/blastem-src
 ENV BLASTEM=/usr/local/bin/blastem
 
 # ClownMDEmu

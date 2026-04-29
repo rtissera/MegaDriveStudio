@@ -64,10 +64,46 @@ EDPRO_PORT=/dev/ttyACM0  # port USB Mega Everdrive Pro
 
 ## Notes debug BlastEm + GDB
 
+- Repo officiel : `hg clone https://www.retrodev.com/repos/blastem` (Mercurial, Michael Pavone)
+- Build : `make -j$(nproc) CFLAGS="-O2 -g" CPU_FLAGS=""`
 - BlastEm pipe mode (Linux) : `target remote | blastem rom.bin -D`
 - BlastEm socket mode : lancer `blastem rom.bin -D`, puis `target remote :1234`
 - `set substitute-path /sgdk $GDK` pour remapper les sources SGDK
 - KDebug s'affiche dans le terminal où tourne BlastEm (stderr)
+
+## Skills Claude (scripts/claude-skills/)
+
+Fichiers de contexte expert injectés automatiquement dans le prompt Claude.
+Sélection auto selon le contenu analysé (erreurs build, log KDebug...).
+
+| Skill | Contenu | Triggers |
+|-------|---------|----------|
+| `m68k.md` | instruction set M68000, registres, cycles, patterns | fichiers .s, registres D0-D7, exceptions |
+| `z80.md` | Z80 MD, bus arbitration, drivers son | YM2612, XGM, BUSREQ |
+| `sgdk.md` | API SGDK 2.x, rescomp, build flags | genesis.h, VDP_, SPR_, makefile.gen |
+| `megadrive.md` | hardware MD, carte mémoire, VDP, timing | VRAM, C00000, A130xx |
+
+### Utilisation
+
+```bash
+# Analyse erreurs build (auto-détection skills + auto-détection tokens)
+make debug 2>&1 | python3 scripts/claude-build-assist.py
+
+# Mode caveman : réponse ≤5 lignes, pas de markdown, 256 tokens max
+make debug 2>&1 | python3 scripts/claude-build-assist.py --caveman
+
+# Forcer des skills spécifiques
+python3 scripts/claude-build-assist.py --mode klog --file /tmp/kdebug.log --skills sgdk,megadrive
+
+# Analyser output ASM 68k
+python3 scripts/claude-build-assist.py --mode asm --file out/rom.asm
+
+# Voir skills disponibles
+python3 scripts/claude-build-assist.py --mode skills-info
+
+# Sans skills (prompt minimal, moins de tokens)
+make debug 2>&1 | python3 scripts/claude-build-assist.py --no-skills --caveman
+```
 
 ## Notes ClownMDEmu
 

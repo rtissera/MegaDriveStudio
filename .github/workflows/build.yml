@@ -84,13 +84,13 @@ jobs:
         run: |
           sudo apt-get install -y --no-install-recommends \
             libsdl2-dev libglew-dev zlib1g-dev libpng-dev \
-            xvfb
+            mercurial xvfb
 
-      - name: Build BlastEm
+      - name: Build BlastEm (repo Pavone)
         run: |
-          git clone --depth=1 https://github.com/libretro/blastem /tmp/blastem
+          hg clone https://www.retrodev.com/repos/blastem /tmp/blastem
           cd /tmp/blastem
-          make -j$(nproc) CFLAGS="-O2" 2>&1 | tail -5
+          make -j$(nproc) CFLAGS="-O2" CPU_FLAGS="" 2>&1 | tail -5
 
       - name: Smoke test (run 5s headless)
         run: |

@@ -27,13 +27,12 @@ jobs:
         if: steps.cache-blastem.outputs.cache-hit != 'true'
         run: |
           sudo apt-get install -y --no-install-recommends \
-            libsdl2-dev libglew-dev zlib1g-dev libpng-dev
-          git clone --depth=1 https://github.com/libretro/blastem /tmp/blastem-src
+            libsdl2-dev libglew-dev zlib1g-dev libpng-dev mercurial
+          hg clone https://www.retrodev.com/repos/blastem /tmp/blastem-src
           cd /tmp/blastem-src
-          make -j$(nproc) CFLAGS="-O2"
+          make -j$(nproc) CFLAGS="-O2" CPU_FLAGS=""
           mkdir -p /tmp/blastem-bin
           cp blastem /tmp/blastem-bin/
-          # Copy shaders and default config needed by BlastEm
           cp -r shaders /tmp/blastem-bin/ 2>/dev/null || true
           cp default.cfg /tmp/blastem-bin/ 2>/dev/null || true
 

@@ -168,11 +168,39 @@
       "presentation": { "reveal": "always", "panel": "dedicated", "group": "claude" }
     },
     {
+      "label": "Claude: Explain build error [caveman]",
+      "type": "shell",
+      "command": "make debug 2>&1 | python3 scripts/claude-build-assist.py --caveman",
+      "group": "build",
+      "presentation": { "reveal": "always", "panel": "dedicated", "group": "claude" }
+    },
+    {
       "label": "Claude: Analyze KDebug log",
       "type": "shell",
       "command": "python3 scripts/claude-build-assist.py --mode klog --file /tmp/kdebug.log",
       "group": "test",
       "presentation": { "reveal": "always", "panel": "dedicated", "group": "claude" }
+    },
+    {
+      "label": "Claude: Analyze KDebug log [caveman]",
+      "type": "shell",
+      "command": "python3 scripts/claude-build-assist.py --mode klog --file /tmp/kdebug.log --caveman",
+      "group": "test",
+      "presentation": { "reveal": "always", "panel": "dedicated", "group": "claude" }
+    },
+    {
+      "label": "Claude: Analyze ASM output",
+      "type": "shell",
+      "command": "python3 scripts/claude-build-assist.py --mode asm --file out/rom.asm",
+      "group": "test",
+      "presentation": { "reveal": "always", "panel": "dedicated", "group": "claude" }
+    },
+    {
+      "label": "Claude: Show available skills",
+      "type": "shell",
+      "command": "python3 scripts/claude-build-assist.py --mode skills-info",
+      "group": "build",
+      "presentation": { "reveal": "always", "panel": "shared", "group": "claude" }
     },
 
     // ══════════════════════════════════════════════════════════════════════════

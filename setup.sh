@@ -43,7 +43,7 @@ command -v apt >/dev/null 2>&1 || fail "apt non trouvé — Ubuntu/Debian requis
 step "Dépendances système"
 sudo apt-get update -qq
 sudo apt-get install -y --no-install-recommends \
-  build-essential git cmake ninja-build pkg-config curl wget \
+  build-essential git mercurial cmake ninja-build pkg-config curl wget \
   libsdl2-dev libsdl3-dev libglew-dev zlib1g-dev libpng-dev \
   libfreetype-dev \
   gdb-multiarch python3 python3-pip \
@@ -94,19 +94,32 @@ cd "$SGDK_DIR"
 make -f makelib.gen GDK="$GDK" MARSDEV="$MARSDEV" 2>&1 | tail -5
 log "SGDK installé dans $SGDK_DIR"
 
-# ── BlastEm ───────────────────────────────────────────────────────────────────
+# ── BlastEm (repo officiel Mercurial — Michael Pavone) ───────────────────────
 if $INSTALL_BLASTEM; then
-  step "BlastEm (build depuis source)"
-  BLASTEM_DIR="$SRC_DIR/blastem"
-  if [[ ! -d "$BLASTEM_DIR/.git" ]]; then
-    git clone https://github.com/libretro/blastem "$BLASTEM_DIR"
-  else
-    git -C "$BLASTEM_DIR" pull --ff-only
+  step "BlastEm (hg clone — repo officiel Michael Pavone)"
+
+  # Mercurial requis
+  if ! command -v hg >/dev/null 2>&1; then
+    sudo apt-get install -y --no-install-recommends mercurial
   fi
+
+  BLASTEM_DIR="$SRC_DIR/blastem"
+  HG_REPO="https://www.retrodev.com/repos/blastem"
+
+  if [[ ! -d "$BLASTEM_DIR/.hg" ]]; then
+    log "Clone du repo Mercurial $HG_REPO"
+    hg clone "$HG_REPO" "$BLASTEM_DIR"
+  else
+    log "Mise à jour du repo Mercurial"
+    hg -R "$BLASTEM_DIR" pull -u
+  fi
+
   cd "$BLASTEM_DIR"
-  make -j"$(nproc)" CFLAGS="-O2 -g" 2>&1 | tail -5
+  # BlastEm utilise un Makefile custom — pas de configure
+  # CPU_FLAGS="" pour éviter les -march trop spécifiques
+  make -j"$(nproc)" CFLAGS="-O2 -g" CPU_FLAGS="" 2>&1 | tail -5
   ln -sf "$BLASTEM_DIR/blastem" "$BIN_DIR/blastem"
-  log "BlastEm installé : $BIN_DIR/blastem"
+  log "BlastEm installé : $BIN_DIR/blastem (rev $(hg -R "$BLASTEM_DIR" id -n))"
 fi
 
 # ── ClownMDEmu ────────────────────────────────────────────────────────────────

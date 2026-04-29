@@ -99,9 +99,11 @@ info:
 	@echo "  ED Pro     : $(EDPRO_PORT)"
 
 rebuild-blastem:
-	@echo "[rebuild] BlastEm depuis source"
+	@echo "[rebuild] BlastEm depuis repo Mercurial Pavone"
 	@cd $$HOME/.local/megadrive-studio/src/blastem && \
-	  git pull && make -j$$(nproc) CFLAGS="-O2 -g"
+	  hg pull -u && \
+	  make -j$$(nproc) CFLAGS="-O2 -g" CPU_FLAGS="" && \
+	  echo "BlastEm rev: $$(hg id -n)"
 
 rebuild-clown:
 	@echo "[rebuild] ClownMDEmu depuis source"
