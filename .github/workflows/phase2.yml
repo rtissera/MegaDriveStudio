@@ -143,6 +143,10 @@ jobs:
           ASAN_OPTIONS: detect_leaks=0
         run: cargo test --release -- --nocapture
 
+      - name: Build clownmdemu_libretro.so (for e2e test)
+        working-directory: vendor/clownmdemu-libretro
+        run: make -j"$(nproc)"
+
       - name: Build sample ROM (SGDK Docker)
         run: |
           docker run --rm \
