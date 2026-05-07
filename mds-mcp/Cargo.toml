@@ -43,6 +43,10 @@ axum = { version = "0.8", default-features = false, features = ["http1", "tokio"
 tokio-util = "0.7"
 bytes = "1.8"
 png = "0.17"
+# `async-trait` is needed because `EdProTarget` stores its transport as
+# `Box<dyn UsbTransport>` and native async-fn-in-trait isn't dyn compatible
+# (E0038). Cost is one allocation per call which is dwarfed by USB latency.
+async-trait = "0.1"
 
 [dev-dependencies]
 tokio = { version = "1.41", features = ["full", "process"] }
