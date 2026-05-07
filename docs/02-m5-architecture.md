@@ -258,22 +258,33 @@ mds-mcp/tests/
   edpro_golden.rs  — replay captured frames against MockUsb
   rsp_codec.rs     — pure-function unit tests for rsp.rs
 
-mds-stub-68k/        — separate crate, no_std, target m68k-elf
-  Cargo.toml
-  src/lib.rs       — entry, init, vector patcher
-  src/asm/
-    vectors.s      — overrides $24, $84, $C4
+mds-stub-68k/        — separate C library, target m68k-elf-gcc (NOT Rust)
+  Makefile         — m68k-elf-gcc -m68000 -Os -nostdlib -ffreestanding
+  src/
+    stub.c         — RSP dispatcher (cleanroom on mborgerson/gdbstub MIT)
+    rsp.c          — RSP packet enc/dec (wire-compatible w/ mds-mcp/rsp.rs)
+    usb.c          — $A130D0/D2 FIFO read/write
+    bp.c           — patch table, atomic write of TRAP #1 word
+    vectors.s      — overrides $24, $84, $C4 (m68k-elf-as)
     save_regs.s    — exception-frame save/restore macro
-    stub.s         — TRAP #1 handler, Trace handler
-  src/rsp_glue.rs  — shim onto mborgerson/gdbstub state machine
-  src/bp.rs        — patch table, atomic write of TRAP #1 word
-  build.rs         — invokes m68k-elf-as
+  include/
+    mds_stub.h     — public API: mds_stub_init()
+  link.ld.frag     — vector overrides for SGDK linker
+  README.md
 ```
 
-`mds-stub-68k` builds as a static `.a` linked into the user ROM by SGDK.
-The vector patcher is a build-time tool that rewrites the four vector longs
-in the ROM image before the final `hex2bin`. Runtime vector patching is
-impossible on 68000 (no VBR); build-time is the only path.
+**Why C, not Rust:** m68k has no upstream Rust tier-1/2 target. Custom
+target JSON + nightly `build-std` works but flaky; `mborgerson/gdbstub`
+reference is C anyway → cleanroom port w/o language barrier; `m68k-elf-gcc`
+already in marsdev bundle (used by SGDK); smaller binary (no `core` bloat);
+hand-rolled buffers cheap when no allocator.
+
+`mds-stub-68k` builds as a static `libmdsstub.a` linked into the user ROM
+by SGDK. User adds `LIBS += -lmdsstub` + `LDFLAGS += -T mds_stub_vectors.ld`
+to their Makefile + calls `mds_stub_init()` at start of `main()`. The
+vector patcher is a build-time linker fragment that rewrites the four
+vector longs in the ROM image before the final `hex2bin`. Runtime vector
+patching is impossible on 68000 (no VBR); build-time is the only path.
 
 ---
 
@@ -338,13 +349,13 @@ hand to validate". Items 1–12 + 14–15 are testable against `MockUsb` only;
 |  6  | Tool-to-RSP dispatcher (`g`/`G`/`m`/`M`/`c`/`s`/`Z0`/`z0`) | `mds-mcp/src/target/edpro/mod.rs`, `mds-mcp/src/tools/mod.rs` (modify) | 4, 5 | no  |
 |  7  | Host-side BP table mirror, atomic patch/restore protocol   | `mds-mcp/src/target/edpro/stub_sync.rs` (new)              | 6          | no  |
 |  8  | T-bit step state machine (single-shot trace expected)      | `mds-mcp/src/target/edpro/stub_sync.rs`                    | 6          | no  |
-|  9  | 68k stub crate skeleton (no_std, m68k-elf-as)              | `mds-stub-68k/Cargo.toml`, `mds-stub-68k/src/{lib.rs,asm/*}` (new) | — | no  |
-| 10  | Vector patcher (build-time tool)                           | `mds-stub-68k/src/bin/vector_patch.rs` (new)               | 9          | no  |
-| 11  | KDebug-over-USB shim (replaces SGDK `KDebug_Alert`)        | `mds-stub-68k/src/asm/kdebug.s` (new), SGDK link patch     | 9          | partial (SGDK weak-link Q) |
+|  9  | 68k stub C library skeleton (m68k-elf-gcc)                 | `mds-stub-68k/Makefile`, `mds-stub-68k/src/{stub,rsp,usb,bp}.c`, `vectors.s` (new) | — | no  |
+| 10  | Vector patcher (linker fragment, build-time)               | `mds-stub-68k/link.ld.frag` (new)                          | 9          | no  |
+| 11  | KDebug-over-USB shim (replaces SGDK `KDebug_Alert`)        | `mds-stub-68k/src/kdebug.s` (new), SGDK link patch         | 9          | partial (SGDK weak-link Q) |
 | 12  | Host `kdebug_monitor` MCP tool                             | `mds-mcp/src/tools/mod.rs` (modify)                        | 4          | no  |
 | 13  | E2E smoke test (upload, kprintf, BP hit, single-step)      | `mds-mcp/tests/edpro_e2e.rs` (new)                         | 1–12       | **yes** |
-| 14  | Pause-via-host: design IRQ7 trigger from MCU writes        | `mds-stub-68k/src/asm/stub.s`, host `pause` impl           | 9          | yes (mechanism unknown — §10) |
-| 15  | Polled watchpoint (during T-bit step)                      | `mds-stub-68k/src/bp.rs`, `stub_sync.rs`                   | 7, 8       | partial (perf tuning) |
+| 14  | Pause-via-host: design IRQ7 trigger from MCU writes        | `mds-stub-68k/src/vectors.s`, host `pause` impl            | 9          | yes (mechanism unknown — §10) |
+| 15  | Polled watchpoint (during T-bit step)                      | `mds-stub-68k/src/bp.c`, `stub_sync.rs`                    | 7, 8       | partial (perf tuning) |
 | 16  | Refactor `scripts/gdb-proxy.py` into mds-mcp tool surface  | `mds-mcp/src/target/edpro/proxy.rs` (new)                  | 5          | no  |
 
 The CLAUDE.md `Notes Mega Everdrive Pro` section already references
