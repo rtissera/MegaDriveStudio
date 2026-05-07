@@ -52,7 +52,7 @@ pub struct libra_config_t {
 /// address itself — the placeholder will trigger an unimplemented-trap
 /// loop if anyone ever tries to actually run it on hardware, which is
 /// the desired loud failure mode.
-const PLACEHOLDER_LOAD_ADDR: u32 = 0x00FF_8000;
+const PLACEHOLDER_LOAD_ADDR: u32 = 0x0030_0000;
 
 fn write_placeholder_stub(out: &Path) -> std::io::Result<()> {
     let mut blob = Vec::with_capacity(32);

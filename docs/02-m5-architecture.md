@@ -72,9 +72,15 @@ and the
 | `$A130D0` | `REG_FIFO_DATA`| u16   | r/w       | Host-cart mailbox. Read pulls one byte; write pushes one byte.       |
 | `$A130D2` | `REG_FIFO_STAT`| u16   | r         | Bit 15 (`FIFO_CPU_RXF`) = CPU has data to read. Bits 0..10 = byte count available (`FIFO_RXF_MSK = 0x7FF`). |
 | `$A130D4` | `REG_SYS_STAT` | u16   | r         | System status (USB connected, mode flags). Bit semantics TBD.        |
-| `$A130F1` | `SSF_CTRL`     | u8    | w         | SSF mapper enable. Write `0x2A` once at boot to enable extended-SSF. |
-| `$A130E2` | `SSF_BANK_E`   | u8    | w         | SSF mapper bank register. **Not USB.** Old project memory had this   |
-|           |                |       |           | wrong; do not use for I/O.                                           |
+| `$A130F1` | `SSF_CTRL`     | u8    | w         | CTRL0 of extended-SSF (krikzz `extended-ssf.txt`). Bit `W` enables 68k-side PSRAM writes; mapper enable. |
+
+> **Retraction (per fact-check C21/C23):** earlier drafts of this doc
+> listed `$A130E2` as `SSF_BANK_E`. That is **wrong**. Per Plutiedev's
+> `/a130xx-usage` allocation map, `$A130D0-$A130E7` is **EverDrive
+> private space, undocumented**. The actual SSF mapper bank registers
+> live at `$A130F0-$A130FE` (word) / odd-byte-mirror `$A130F1, F3, ...,
+> FF` per `extended-ssf.txt`. Do NOT touch `$A130E2`; its semantics
+> are not in any primary source.
 
 ### 3.2 Host-side PI bus address space (used as `addr` arg of `MEM_RD`/`MEM_WR`)
 
@@ -142,19 +148,38 @@ and
 
 ### 4.3 ROM upload sample byte sequence
 
-Uploading a 4 KB ROM block to PSRAM offset `0x000000`:
+Uploading a 4 KB ROM block to PSRAM (PI-bus offset `0x000000`):
 
 ```
-+      ~+    CMD   ~CMD  | addr (u32 BE) | len (u32 BE)  | ack
++      ~+    CMD   ~CMD  | addr (u32 BE) | len (u32 BE)  | ack-mode
 0x2B   0xD4  0x1A  0xE5  | 00 00 00 00   | 00 00 10 00   | AA
-data[0..1024]   <-- wait for 1 byte ACK from cart
-data[1024..2048] <-- wait for 1 byte ACK
-data[2048..3072] <-- wait for 1 byte ACK
-data[3072..4096] <-- wait for 1 byte ACK
+                                                          (one-time mode byte)
+
+[wait 1 ack byte from cart, expect 0x00 = OK] | data[0..1024]
+[wait 1 ack byte from cart, expect 0x00 = OK] | data[1024..2048]
+[wait 1 ack byte from cart, expect 0x00 = OK] | data[2048..3072]
+[wait 1 ack byte from cart, expect 0x00 = OK] | data[3072..4096]
 ```
 
-`ack=0xAA` enables per-1024-byte gating because `addr < 0x1800000`. CFG-area
-uploads (`addr >= 0x1800000`) pass `ack=0x00` and stream straight through.
+Per fact-check C11 (krikzz `ed_cmd_mem_wr` + megalink-rs `tx_ack`):
+
+- `0xAA` is the ONE-TIME **mode byte** in the MEM_WR header that requests
+  ack-gating. It is sent ONCE for the whole transfer when
+  `addr < PI_CFG_BASE` (0x180_0000), i.e. for ROM/SRAM/BRAM writes.
+- The per-chunk ACK from the cart is **1 byte where 0x00 = OK and any
+  non-zero value is an error code**. This ack arrives BEFORE each 1 KiB
+  chunk is transmitted by the host.
+
+CFG-area uploads (`addr >= 0x180_0000`) pass `ack-mode=0x00` and stream
+straight through, no per-chunk ACKs.
+
+### 4.3.1 Halt-before-write rule
+
+Per fact-check C20: krikzz's documented pattern is `HOST_RST(Soft)` →
+`MEM_WR` → `HOST_RST(Off)`. Issuing `MEM_WR` while the 68k is running
+is undocumented and unverified — the MCU may stall the bus or corrupt
+PSRAM. **Always halt the CPU first.** This applies to vector-table
+patching at `$24`/`$84` too.
 
 ### 4.4 Cart→host streaming (`USB_WR`)
 
@@ -169,36 +194,65 @@ For M5 we play it safe: the ROM-side KDebug shim emits the full
 `+ ~+ 0x22 ~0x22 len data` frame into the FIFO. This matches what
 `ed_cmd_usb_wr` does on the MCU side.
 
+> **Retraction (per fact-check C25):** earlier drafts referred to a
+> `megalink monitor` / `megalink-rs monitor` subcommand to consume this
+> stream on the host. **No such command exists** in megalink-rs (verified
+> against `src/bin/megalink.rs`, subcommands: SetMode, Reset, Recover,
+> Run, LoadFPGA). The host-side `USB_WR` consumer is to be implemented
+> in mds-mcp itself — see §8 task 12 (`kdebug_monitor` MCP tool).
+
 ---
 
 ## 5. 68k stub design
 
-### 5.1 Deployment model: host-uploaded blob, NOT a linked library
+### 5.1 Deployment model: host-uploaded blob, code in PSRAM, data in work RAM
 
 The stub is **not** linked into the user's SGDK ROM. It is a standalone
-position-fixed 68k binary blob (`mds-stub-68k/mdsstub.bin`, ~7 KB) that
-the host (`mds-mcp`) uploads at debug-attach time using the same
-`MEM_WR` opcode it would use for a ROM upload. The user ROM has zero
-awareness the stub exists — no header, no library, no `init()` call.
+position-fixed 68k binary blob (`mds-stub-68k/mdsstub.bin`, ~2 KB after
+the M5.4b shrink) that the host (`mds-mcp`) uploads at debug-attach time
+using `MEM_WR`. The user ROM has zero awareness the stub exists.
 
-Why this works on EdPro Pro:
+**Crucial address-space distinction (per fact-check C13/C14/C26):**
+`MEM_WR addr` operates on the cart **PI-bus** address space, NOT the
+68k bus. Mapping:
 
-- Cart "ROM" is PSRAM, fully writable from the cart MCU at any time.
-- `MEM_WR` (0x1A) reaches anywhere in 68k space, including work RAM
-  (`$FF0000-$FFFFFF`) and the actual exception vectors at `$0024` /
-  `$0084`. The host writes the stub blob to its load address, then
-  writes the entry-point addresses directly into the vector slots —
-  no link-time vector override, no runtime self-installation.
-- 68000 has no VBR. Vectors live at `$0000-$03FF` and are read on
-  every exception. We never need to relocate the table: we just
-  rewrite the four bytes at `$24` and `$84`.
+| PI base | region | 68k visible at |
+|---------|--------|----------------|
+| `0x000_0000` | ROM (16 MB PSRAM) | `$000000-$3FFFFF` (cart-mapped ROM) |
+| `0x100_0000` | SRAM   | (via mapper) |
+| `0x108_0000` | BRAM   | (via mapper) |
+| `0x180_0000` | CFG    | n/a (MCU-side) |
+| `0x181_0000` | FIFO   | n/a (MCU-side; mirrors `$A130D0`) |
+| `0x183_0000` | MAP    | n/a (MCU-side) |
 
-The previous M5.4 design statically linked `libmdsstub.a` into the
-user ROM, called `mds_stub_init()` from `main()`, and tried to patch
-"$FF0024" at runtime. That was wrong: 68000 reads vectors only from
-`$0000-$03FF`, never from `$FF0000+`. (The 68010 added a VBR; the
-Mega Drive's plain 68000 does not.) The current design drops all
-of that.
+There is **no PI-bus alias for MD work RAM** (`$FF0000-$FFFFFF`). The
+host therefore CANNOT push state to work RAM via MEM_WR; the only path
+to work RAM is via the on-cart stub speaking RSP `M`.
+
+Layout this implies:
+
+- **Code (text + rodata)** lives in cart PSRAM at `PiBusAddr(0x300000)`.
+  The 68k sees this as cart-mapped ROM at `$300000`. The 3 MB mark sits
+  beyond typical 1-2 MB user ROM images, leaving room for the user ROM
+  at PSRAM `0x000000+`. Free real estate — doesn't eat work RAM.
+- **Data (BSS)** lives in MD work RAM at `$FFEE00..$FFEFFF` (512 bytes).
+  Sits in a no-man's-land between SGDK heap (typically below `$FFD000`)
+  and SGDK stack (`$FFFFFE` growing down). User ROMs MUST NOT touch
+  this region during a debug session. Trade-off acknowledged: 0.8% of
+  work RAM eaten by debug.
+- **Vector table** at `$0000-$03FF` lives in PSRAM (because 68k `$0..$3FFFFF`
+  is mapped onto PSRAM `0x000000+`). The host writes vectors `$24` /
+  `$84` via `MEM_WR PiBusAddr(0x24)` / `PiBusAddr(0x84)`.
+
+Because BSS is referenced by ABSOLUTE 68k addresses (no relocation) and
+the host has no way to pre-zero it, the stub zero-initialises BSS
+itself on the first exception entry.
+
+The previous M5.4 design uploaded the stub to `$FF8000` via MEM_WR.
+That was wrong on two counts: (a) `MEM_WR addr=$FF8000` lands at PSRAM
+PI-offset `0xFF8000`, not in 68k work RAM at all; (b) even if the host
+had a path to work RAM, putting code there would race with SGDK's heap
+and stack. The current design relocates code to PSRAM.
 
 ### 5.2 Constraints
 
@@ -238,29 +292,34 @@ writes the four-byte entry addresses verbatim into vectors `$24` and
 
 ### 5.4 Blob layout
 
-Linked at `$FF8000` (low end of "upper" work RAM — leaves SGDK heap
-room below and stack room above). Single section, 16-byte header
-followed by code + rodata + zeroed BSS.
+Code at PI-bus `$300000` (PSRAM, 68k-visible at `$300000`). BSS at 68k
+`$FFEE00` (work RAM, NOT in the binary blob — zero-initialised by the
+stub on first exception entry).
 
 ```
-$FF8000   header (16 B):
-            +0x00  u32  MAGIC = 'MDST' (0x4D445354)
-            +0x04  u32  entry_trace      = $FF8C4C (current build)
-            +0x08  u32  entry_trap1      = $FF8C68 (current build)
-            +0x0C  u32  reserved         = 0
-$FF8010   .text + .rodata (~3.4 KB)
-$FF8D54   __bss_start
-$FF9558   rsp_in_raw    (1024 B) — inbound RSP frame buffer
-$FF9158   rsp_in_payload(1024 B) — decoded payload
-$FF8D58   rsp_out       (1024 B) — outbound encoded frame
-$FF9958   g_bps[32]     (256 B)  — BP table mirror
-$FF9A58   mds_regs[18]  (72 B)   — exception register save
-$FF9AA0   __bss_end / __stub_end
+PSRAM @ 0x300000  header (16 B):
+                    +0x00  u32  MAGIC = 'MDST' (0x4D445354)
+                    +0x04  u32  entry_trace      = $3006BC (current build)
+                    +0x08  u32  entry_trap1      = $3006D8 (current build)
+                    +0x0C  u32  reserved         = 0
+PSRAM @ 0x300010  .text + .rodata (~1.95 KB)
+PSRAM @ 0x3007B0  __stub_end
+
+WorkRAM @ $FFEE00  __bss_start
+                   g_init_cookie  (4 B)   — first-call zero-init latch
+                   rsp_payload    (190 B) — decoded RSP payload buffer
+WorkRAM @ $FFEEC4  mds_regs[18]   (72 B)  — exception register save
+WorkRAM @ $FFEF0C  __bss_end       (= 268 B used; 244 B slack to $FFEFFF)
 ```
 
-Total flat-bin size: ~6.8 KB (text + zeroed BSS — host MEM_WRs the
-whole thing in one shot, so the stub's static buffers are clean on
-first exception).
+Total flat-bin size: ~2.0 KB (text only — BSS is not materialised).
+After "easy wins" shrink:
+- BP table dropped (host owns it via `stub_sync.rs`; stub never sees Z0/z0).
+- RLE `*N` decode dropped (host's rsp.rs never emits RLE).
+- Escape pass on encode dropped (stub-side payloads never contain # $ } *).
+- Outbound frame buffer moved to supervisor stack (kilobytes free).
+- Single decoded-payload buffer @ 190 B (matches advertised PacketSize).
+- `bp.{c,h}` and `rsp.{c,h}` files folded into `stub.c`.
 
 GDB register layout for `g` / `G` on plain m68k (no FPU): 18 longs =
 72 bytes, order `D0..D7 A0..A6 USP SR PC`. Matches
@@ -277,25 +336,29 @@ Whether the stub also needs to wrap each outbound RSP packet in a
 §10.Q1; the current stub writes raw RSP into the FIFO, and we'll add
 the envelope only if hardware bring-up shows it's needed.
 
-`qSupported` reply: `PacketSize=400;swbreak+;qXfer:features:read-`.
-Acks (`+`/`-`) enabled until `QStartNoAckMode` is acknowledged.
+`qSupported` reply: `PacketSize=190;swbreak+;qXfer:features:read-`.
+Stub never emits acks; the host's first `+` byte is swallowed during
+packet sync. `QStartNoAckMode` returns `OK` immediately.
 
 ### 5.6 Host connect sequence
 
-End-to-end attach flow, all driven from `mds-mcp`:
+End-to-end attach flow, all driven from `mds-mcp` (per fact-check C20
+halt-first rule):
 
-1. `HOST_RST` (mode = soft) — halts the 68k.
-2. `MEM_WR` `mdsstub.bin` to `$FF8000` (whole file, including pre-zeroed BSS).
+1. `HOST_RST(Soft)` — halts the 68k.
+2. `MEM_WR` `mdsstub.bin` to `PiBusAddr(0x300000)` (PSRAM). Per-chunk
+   ack-gating active because `addr < PI_CFG_BASE`.
 3. Read header bytes [4..12] from the blob → two u32 entry addresses.
-4. `MEM_WR` 4 bytes (`entry_trace`) to `$00000024`.
-5. `MEM_WR` 4 bytes (`entry_trap1`) to `$00000084`.
-6. (Optional) plant a BP at user `main`.
-7. `HOST_RST` (mode = off) — releases CPU; user ROM runs from reset.
+4. `MEM_WR` 4 bytes (`entry_trace`) to `PiBusAddr(0x000024)`.
+5. `MEM_WR` 4 bytes (`entry_trap1`) to `PiBusAddr(0x000084)`.
+6. (Optional) plant a BP at user `main` via host-side `stub_sync` BP table.
+7. `HOST_RST(Off)` — releases CPU; user ROM runs from reset.
 8. Wait for first stop reply, then `qSupported` / `QStartNoAckMode`.
 
-The stub does **no** initialisation. There is no `mds_stub_init()` —
-the host configures everything before allowing the CPU to execute its
-first user instruction.
+The stub does **no** initialisation other than zeroing its own BSS on
+first entry. There is no `mds_stub_init()` — the host configures
+everything before allowing the CPU to execute its first user
+instruction.
 
 ---
 
@@ -322,14 +385,15 @@ mds-mcp/tests/
 mds-stub-68k/        — standalone 68k blob, target m68k-elf-gcc (NOT Rust)
   Makefile         — m68k-elf-gcc -m68000 -Os -nostdlib -ffreestanding
                      -T mdsstub.ld; objcopy -O binary
-  mdsstub.ld       — linker script: single .stub section at $FF8000
+  mdsstub.ld       — linker script: .stub section at PSRAM $300000;
+                     .bss section at work RAM $FFEE00 (NOLOAD)
   src/
     entry.s        — 16-byte header + Trace / TRAP #1 entry thunks
-    save_regs.s    — exception-frame register save / restore
-    stub.c         — RSP dispatcher (cleanroom on mborgerson/gdbstub MIT)
-    rsp.{c,h}      — RSP packet enc/dec (wire-compatible w/ mds-mcp/rsp.rs)
+    save_regs.s    — exception-frame register save / restore + mds_regs
+    stub.c         — single-file RSP dispatcher (BP table dropped — host
+                     owns it; rsp/bp folded inline; cleanroom on
+                     mborgerson/gdbstub MIT)
     usb.{c,h}      — $A130D0/D2 FIFO read/write
-    bp.{c,h}       — local BP table mirror
   README.md        — load addr, entry convention, host connect sequence
   → mdsstub.bin    — flat 68k binary, host-uploadable via MEM_WR
   → mdsstub.elf    — same content with symbols (debugging only)
@@ -519,6 +583,8 @@ In-repo (HEAD `3d9401a`):
   doc-comment at L7 still mentions wrong `$A130E2` — reworded as part of
   task 16).
 - `scripts/kdebug-monitor.sh` — superseded by `kdebug_monitor` MCP tool
-  (task 12).
+  (task 12). Note: there is **no** `megalink monitor` subcommand in
+  megalink-rs (per fact-check C25); the host-side USB_WR consumer must
+  be implemented in mds-mcp itself.
 - `CLAUDE.md` "Notes Mega Everdrive Pro" — high-level orientation; the
   `$A130E2` mention there is being fixed separately.

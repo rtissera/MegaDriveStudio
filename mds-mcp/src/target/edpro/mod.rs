@@ -163,11 +163,11 @@ impl EdProTarget {
     ///
     /// ```ignore
     /// let mut t: Box<dyn UsbTransport + Send> = Box::new(SerialUsb::open(&self.cfg.port)?);
-    /// proto::host_reset(&mut t).await?;          // step 1: halt CPU
+    /// proto::host_reset(&mut t, ResetMode::Soft).await?;  // step 1: halt CPU
     /// stub_blob::deploy(&mut t, stub_blob::STUB_BLOB).await?; // steps 2..5
     /// // step 6: optional pre-set BPs (host responsibility, e.g. main())
-    /// proto::host_reset(&mut t).await?;          // step 7: release CPU (off mode)
-    /// self.connect_mock(t).await                 // step 8: handshake on first stop
+    /// proto::host_reset(&mut t, ResetMode::Off).await?;   // step 7: release CPU
+    /// self.connect_mock(t).await                          // step 8: handshake on first stop
     /// ```
     ///
     /// Until the SerialUsb transport exists, callers in tests use
@@ -187,15 +187,13 @@ impl EdProTarget {
     }
 
     /// Test / future-real-USB helper: take an already-open transport, run
-    /// the full attach flow:
-    ///   1. `HOST_RST` (halt)
-    ///   2. `MEM_WR` stub blob to load address
-    ///   3. `MEM_WR` vector $24 / $84
-    ///   4. `HOST_RST` (release)
+    /// the full attach flow per fact-check C20 (krikzz halt-first pattern):
+    ///   1. `HOST_RST(Soft)` — halt CPU
+    ///   2. `MEM_WR` stub blob to PSRAM load address
+    ///   3. `MEM_WR` vector $24 / $84 in PSRAM
+    ///   4. `HOST_RST(Off)`  — release CPU
     ///   5. gdb handshake on first stop reply
     ///
-    /// `replies_after_reset` is the canned reply queue the mock uses for
-    /// the post-release handshake (`qSupported`, `QStartNoAckMode`).
     /// Real-USB callers will pass the live `transport` straight through —
     /// the handshake reads from it as it would in production.
     pub async fn deploy_stub_then_handshake(
@@ -206,13 +204,13 @@ impl EdProTarget {
         // the blanket impl `UsbTransport for Box<T>` makes the Box itself
         // a valid (Sized) `T: UsbTransport`, so the proto helpers accept it
         // without `?Sized` plumbing. Same trick for the stub_blob deploy.
-        proto::host_reset(&mut transport)
+        proto::host_reset(&mut transport, proto::ResetMode::Soft)
             .await
             .map_err(|e| anyhow::anyhow!("host_reset (halt) failed: {e}"))?;
         stub_blob::deploy(&mut transport, stub_blob::STUB_BLOB)
             .await
             .map_err(|e| anyhow::anyhow!("stub deploy failed: {e}"))?;
-        proto::host_reset(&mut transport)
+        proto::host_reset(&mut transport, proto::ResetMode::Off)
             .await
             .map_err(|e| anyhow::anyhow!("host_reset (release) failed: {e}"))?;
         self.connect_mock(transport).await
@@ -757,38 +755,52 @@ mod tests {
 
     #[tokio::test]
     async fn deploy_stub_then_handshake_emits_full_attach_sequence() {
-        // The mock pre-loads ONLY the handshake replies (no replies needed
-        // for HOST_RST or MEM_WR — they're write-only frames; mem_write
-        // skips the ACK read under cfg(test)).
+        // Mock pre-loads MEM_WR per-chunk ack bytes (one before each
+        // 1 KiB chunk in ack-mode) plus the handshake replies. The blob
+        // is N bytes -> ceil(N/1024) acks. Plus 1 ack each for the two
+        // 4-byte vector patches.
+        let blob_len = stub_blob::STUB_BLOB.len();
+        let blob_chunks = blob_len.div_ceil(1024);
+        let total_acks = blob_chunks + 2;
+        let ack_replies: Vec<Vec<u8>> = vec![vec![0u8; total_acks]];
+
         let mut t = EdProTarget::new(EdProConfig::default());
-        let (m, log) = make_mock(vec![]);
+        let (m, log) = {
+            // Build a mock that has acks FIRST (consumed by mem_write) then
+            // the handshake replies (consumed by handshake).
+            let mut all = ack_replies;
+            all.extend(handshake_replies());
+            let tx_log = Arc::new(Mutex::new(Vec::<u8>::new()));
+            let spy = SpyUsb {
+                inner: MockUsb::with_replies(all),
+                tx_log: tx_log.clone(),
+            };
+            (Box::new(spy) as Box<dyn UsbTransport + Send>, tx_log)
+        };
         t.deploy_stub_then_handshake(m).await.unwrap();
         assert!(t.connected());
 
         // Check the wire log for the deployment sequence:
         //   [HOST_RST soft] [MEM_WR @ load_addr ...] [MEM_WR @ $24 ...]
-        //   [MEM_WR @ $84 ...] [HOST_RST soft]  [qSupported] [QStartNoAckMode]
-        //
-        // We don't decode every frame — just spot-check that the four
-        // distinctive byte patterns appear in order.
-        let host_rst_bytes = [0x2B, 0xD4, 0x29, 0xD6, 0x01];
+        //   [MEM_WR @ $84 ...] [HOST_RST off] [qSupported] [QStartNoAckMode]
+        let host_rst_soft = [0x2B, 0xD4, 0x29, 0xD6, 0x01];
+        let host_rst_off = [0x2B, 0xD4, 0x29, 0xD6, 0x00];
         let mem_wr_at_24 = {
             let mut v = vec![0x2B, 0xD4, 0x1A, 0xE5];
-            v.extend_from_slice(&stub_blob::VEC_TRACE.to_be_bytes());
+            v.extend_from_slice(&stub_blob::VEC_TRACE.0.to_be_bytes());
             v.extend_from_slice(&4u32.to_be_bytes());
             v
         };
         let mem_wr_at_84 = {
             let mut v = vec![0x2B, 0xD4, 0x1A, 0xE5];
-            v.extend_from_slice(&stub_blob::VEC_TRAP1.to_be_bytes());
+            v.extend_from_slice(&stub_blob::VEC_TRAP1.0.to_be_bytes());
             v.extend_from_slice(&4u32.to_be_bytes());
             v
         };
-        assert!(tx_contains(&log, &host_rst_bytes), "HOST_RST not in tx log");
+        assert!(tx_contains(&log, &host_rst_soft), "HOST_RST(Soft) not in tx log");
+        assert!(tx_contains(&log, &host_rst_off), "HOST_RST(Off) not in tx log");
         assert!(tx_contains(&log, &mem_wr_at_24), "MEM_WR @ $24 not in tx log");
         assert!(tx_contains(&log, &mem_wr_at_84), "MEM_WR @ $84 not in tx log");
-        // qSupported gets framed as a `$qSupported...#xx` payload — the
-        // word `qSupported` is enough to confirm the handshake ran.
         assert!(tx_contains(&log, b"qSupported"), "qSupported missing");
     }
 

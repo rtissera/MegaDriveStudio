@@ -1,19 +1,23 @@
 # SPDX-License-Identifier: MIT
 #
 # mds-stub-68k Makefile — produces a position-fixed flat 68k binary
-# (`mdsstub.bin`) that the host (`mds-mcp`) uploads to work RAM via the
+# (`mdsstub.bin`) that the host (`mds-mcp`) uploads to cart PSRAM via the
 # Mega Everdrive Pro `MEM_WR` opcode at debug-attach time.
 #
 # This is NOT a static library and is NOT linked into the user's SGDK ROM.
-# The user ROM has zero awareness the stub exists. Deployment flow:
+# The user ROM has zero awareness the stub exists. Deployment flow (per
+# fact-check C13/C14/C20/C26 in /tmp/mds-edpro-factcheck.md):
 #
-#   1. host sends HOST_RST to halt CPU
-#   2. host MEM_WRs `mdsstub.bin` to the load address ($FF8000 by default)
-#   3. host MEM_WRs JMP-thunks into vectors $24 (Trace) and $84 (TRAP #1)
-#      that target the entry points named in the 16-byte header at the
-#      start of the blob
-#   4. host releases CPU; user ROM runs as normal until something hits a
-#      TRAP #1 or T-bit step → control lands in this stub
+#   1. host sends HOST_RST(Soft) to halt CPU
+#   2. host MEM_WRs `mdsstub.bin` to PSRAM (PI-bus addr $300000)
+#   3. host MEM_WRs entry_trace/entry_trap1 into vectors $24/$84
+#      (PI-bus addrs $24/$84 — vector table is in PSRAM)
+#   4. host sends HOST_RST(Off) to release CPU; user ROM runs until
+#      a TRAP #1 or T-bit step → control lands in this stub
+#
+# Code (text+rodata) lives in PSRAM at $300000+. Data (BSS) lives in MD
+# work RAM at $FFEE00..$FFEFFF — the stub zero-initialises BSS on first
+# entry because the host has no PI-bus path to MD work RAM.
 #
 # See README.md for the full deployment contract and rationale.
 
@@ -28,10 +32,11 @@ OBJDUMP := $(TOOL)-objdump
 SIZE    := $(TOOL)-size
 NM      := $(TOOL)-nm
 
-# Load address must match LD_LOAD_ADDR in the linker script and the
-# constant `STUB_LOAD_ADDR` exposed to the host. If you change one,
-# change all three.
-LOAD_ADDR := 0xFF8000
+# Documented load address — must match `psram_stub` ORIGIN in `mdsstub.ld`
+# and `STUB_LOAD_ADDR` in `mds-mcp/src/target/edpro/stub_blob.rs`. Used
+# only for human-readable reporting (the actual placement is driven by
+# `mdsstub.ld`).
+LOAD_ADDR := 0x300000
 
 # 68000 strict (no 010+ instructions, no MOVEC, no VBR).
 # -Os: optimize for size; we have a ~4 KB budget.
@@ -49,7 +54,7 @@ ASFLAGS := -m68000
 LDFLAGS := -nostdlib -T mdsstub.ld -Wl,--no-warn-rwx-segments \
            -Wl,-Map=mdsstub.map
 
-C_SRCS := src/stub.c src/rsp.c src/usb.c src/bp.c
+C_SRCS := src/stub.c src/usb.c
 S_SRCS := src/entry.s src/save_regs.s
 OBJS   := $(C_SRCS:.c=.o) $(S_SRCS:.s=.o)
 
