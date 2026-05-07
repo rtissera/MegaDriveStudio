@@ -12,6 +12,12 @@ out/
 !examples/hello-world/out/
 !examples/hello-world/out/rom.bin
 
+# Exception: EdPro USB replay fixtures — synthetic byte streams committed
+# so CI can verify wire format without hardware. Regen with
+# MDS_REGENERATE_FIXTURES=1 cargo test --test edpro_replay.
+!mds-mcp/tests/fixtures/edpro/
+!mds-mcp/tests/fixtures/edpro/*.bin
+
 # Logs debug
 /tmp/kdebug-*.log
 /tmp/gdb-proxy.pid
