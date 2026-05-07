@@ -31,6 +31,7 @@
 pub mod framing;
 pub mod proto;
 pub mod rsp;
+pub mod stub_blob;
 pub mod stub_sync;
 pub mod usb;
 
@@ -153,14 +154,68 @@ impl EdProTarget {
         &self.features
     }
 
-    /// Real hardware connect — opens the configured serial port and runs
-    /// the gdb handshake. Not yet wired (M5.7); callers in tests use
-    /// [`Self::connect_mock`].
+    /// Real hardware connect — opens the configured serial port, halts the
+    /// CPU, deploys the on-cart 68k debug stub via `MEM_WR`, releases the
+    /// CPU, and runs the gdb handshake.
+    ///
+    /// **Not yet wired.** The serial-port transport (M5.7) is the only
+    /// missing piece: once it lands, this becomes:
+    ///
+    /// ```ignore
+    /// let mut t: Box<dyn UsbTransport + Send> = Box::new(SerialUsb::open(&self.cfg.port)?);
+    /// proto::host_reset(&mut t).await?;          // step 1: halt CPU
+    /// stub_blob::deploy(&mut t, stub_blob::STUB_BLOB).await?; // steps 2..5
+    /// // step 6: optional pre-set BPs (host responsibility, e.g. main())
+    /// proto::host_reset(&mut t).await?;          // step 7: release CPU (off mode)
+    /// self.connect_mock(t).await                 // step 8: handshake on first stop
+    /// ```
+    ///
+    /// Until the SerialUsb transport exists, callers in tests use
+    /// [`Self::connect_mock`] (handshake only) or the test
+    /// [`Self::deploy_stub_then_handshake`] which exercises the full
+    /// upload+vector-patch flow against a `MockUsb`.
     pub async fn connect(&mut self) -> anyhow::Result<()> {
+        // TODO M5.5b: open serial transport, then call
+        // `Self::deploy_stub_then_handshake` with the live `Box<dyn
+        // UsbTransport + Send>`. The deployment logic itself is fully
+        // covered by `stub_blob::deploy` + `connect_mock` integration tests
+        // — the gating concern is opening `/dev/ttyACM*` reliably.
         anyhow::bail!(
             "{NOT_SUPPORTED}: edpro USB transport not yet implemented (port {:?}); use connect_mock in tests",
             self.cfg.port
         );
+    }
+
+    /// Test / future-real-USB helper: take an already-open transport, run
+    /// the full attach flow:
+    ///   1. `HOST_RST` (halt)
+    ///   2. `MEM_WR` stub blob to load address
+    ///   3. `MEM_WR` vector $24 / $84
+    ///   4. `HOST_RST` (release)
+    ///   5. gdb handshake on first stop reply
+    ///
+    /// `replies_after_reset` is the canned reply queue the mock uses for
+    /// the post-release handshake (`qSupported`, `QStartNoAckMode`).
+    /// Real-USB callers will pass the live `transport` straight through —
+    /// the handshake reads from it as it would in production.
+    pub async fn deploy_stub_then_handshake(
+        &mut self,
+        mut transport: Box<dyn UsbTransport + Send>,
+    ) -> anyhow::Result<()> {
+        // We pass `&mut transport` (a `&mut Box<dyn UsbTransport + Send>`);
+        // the blanket impl `UsbTransport for Box<T>` makes the Box itself
+        // a valid (Sized) `T: UsbTransport`, so the proto helpers accept it
+        // without `?Sized` plumbing. Same trick for the stub_blob deploy.
+        proto::host_reset(&mut transport)
+            .await
+            .map_err(|e| anyhow::anyhow!("host_reset (halt) failed: {e}"))?;
+        stub_blob::deploy(&mut transport, stub_blob::STUB_BLOB)
+            .await
+            .map_err(|e| anyhow::anyhow!("stub deploy failed: {e}"))?;
+        proto::host_reset(&mut transport)
+            .await
+            .map_err(|e| anyhow::anyhow!("host_reset (release) failed: {e}"))?;
+        self.connect_mock(transport).await
     }
 
     /// Test helper: install an arbitrary `UsbTransport` (typically `MockUsb`
@@ -696,6 +751,45 @@ mod tests {
         t.connect_mock_no_handshake(Box::new(MockUsb::new()));
         assert!(t.connected());
         assert!(t.features().is_empty());
+    }
+
+    // --- deploy_stub_then_handshake ------------------------------------
+
+    #[tokio::test]
+    async fn deploy_stub_then_handshake_emits_full_attach_sequence() {
+        // The mock pre-loads ONLY the handshake replies (no replies needed
+        // for HOST_RST or MEM_WR — they're write-only frames; mem_write
+        // skips the ACK read under cfg(test)).
+        let mut t = EdProTarget::new(EdProConfig::default());
+        let (m, log) = make_mock(vec![]);
+        t.deploy_stub_then_handshake(m).await.unwrap();
+        assert!(t.connected());
+
+        // Check the wire log for the deployment sequence:
+        //   [HOST_RST soft] [MEM_WR @ load_addr ...] [MEM_WR @ $24 ...]
+        //   [MEM_WR @ $84 ...] [HOST_RST soft]  [qSupported] [QStartNoAckMode]
+        //
+        // We don't decode every frame — just spot-check that the four
+        // distinctive byte patterns appear in order.
+        let host_rst_bytes = [0x2B, 0xD4, 0x29, 0xD6, 0x01];
+        let mem_wr_at_24 = {
+            let mut v = vec![0x2B, 0xD4, 0x1A, 0xE5];
+            v.extend_from_slice(&stub_blob::VEC_TRACE.to_be_bytes());
+            v.extend_from_slice(&4u32.to_be_bytes());
+            v
+        };
+        let mem_wr_at_84 = {
+            let mut v = vec![0x2B, 0xD4, 0x1A, 0xE5];
+            v.extend_from_slice(&stub_blob::VEC_TRAP1.to_be_bytes());
+            v.extend_from_slice(&4u32.to_be_bytes());
+            v
+        };
+        assert!(tx_contains(&log, &host_rst_bytes), "HOST_RST not in tx log");
+        assert!(tx_contains(&log, &mem_wr_at_24), "MEM_WR @ $24 not in tx log");
+        assert!(tx_contains(&log, &mem_wr_at_84), "MEM_WR @ $84 not in tx log");
+        // qSupported gets framed as a `$qSupported...#xx` payload — the
+        // word `qSupported` is enough to confirm the handshake ran.
+        assert!(tx_contains(&log, b"qSupported"), "qSupported missing");
     }
 
     // --- get_vdp_registers ---------------------------------------------

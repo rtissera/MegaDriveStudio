@@ -173,15 +173,49 @@ For M5 we play it safe: the ROM-side KDebug shim emits the full
 
 ## 5. 68k stub design
 
-### 5.1 Constraints
+### 5.1 Deployment model: host-uploaded blob, NOT a linked library
 
-68000 has no VBR (added in 68010). Vectors live at `$000000-$0003FF`, in
-PSRAM-as-ROM. Cannot relocate at runtime; at link time we point them at code
-that lives in 68k work RAM (`$FF0000-$FFFFFF`, copied there by SGDK init).
-No on-CPU comparator either — software BPs and T-bit stepping are the only
-options.
+The stub is **not** linked into the user's SGDK ROM. It is a standalone
+position-fixed 68k binary blob (`mds-stub-68k/mdsstub.bin`, ~7 KB) that
+the host (`mds-mcp`) uploads at debug-attach time using the same
+`MEM_WR` opcode it would use for a ROM upload. The user ROM has zero
+awareness the stub exists — no header, no library, no `init()` call.
 
-### 5.2 Hybrid TRAP #1 BP + T-bit step
+Why this works on EdPro Pro:
+
+- Cart "ROM" is PSRAM, fully writable from the cart MCU at any time.
+- `MEM_WR` (0x1A) reaches anywhere in 68k space, including work RAM
+  (`$FF0000-$FFFFFF`) and the actual exception vectors at `$0024` /
+  `$0084`. The host writes the stub blob to its load address, then
+  writes the entry-point addresses directly into the vector slots —
+  no link-time vector override, no runtime self-installation.
+- 68000 has no VBR. Vectors live at `$0000-$03FF` and are read on
+  every exception. We never need to relocate the table: we just
+  rewrite the four bytes at `$24` and `$84`.
+
+The previous M5.4 design statically linked `libmdsstub.a` into the
+user ROM, called `mds_stub_init()` from `main()`, and tried to patch
+"$FF0024" at runtime. That was wrong: 68000 reads vectors only from
+`$0000-$03FF`, never from `$FF0000+`. (The 68010 added a VBR; the
+Mega Drive's plain 68000 does not.) The current design drops all
+of that.
+
+### 5.2 Constraints
+
+- 68000 strict — no MOVEC, no VBR, no comparators. Software
+  breakpoints (`TRAP #1`) and T-bit stepping are the only debug
+  primitives.
+- Cleanroom MIT. Built on top of
+  [mborgerson/gdbstub](https://github.com/mborgerson/gdbstub) (MIT) for
+  packet framing / checksum / escape patterns. The m68k-specific glue
+  (entry asm, register save/restore, BP patch table) is written from
+  scratch against the public m68k programmer's reference. **Do not**
+  link crossbridge `gdb-7.3/gdb/m68k-stub.c` (GPLv2) anywhere in this
+  tree.
+- No libc, no `memcpy`/`memset`, no SGDK runtime. The stub is the
+  *running* ROM's debugger; the two share no code.
+
+### 5.3 Hybrid TRAP #1 BP + T-bit step
 
 | Mechanism              | Trigger           | Use case             | Cost                |
 |------------------------|-------------------|----------------------|---------------------|
@@ -189,52 +223,79 @@ options.
 | T-bit set in `SR`      | every instruction | single-step          | ~10× slowdown       |
 | Polled WP during step  | every instruction | data watchpoint      | only during step    |
 
-Vectors patched at link time in the user ROM image:
+Vector layout (rewritten by the host at debug-attach):
 
 ```
-$0024  Trace exception   -> stub_trace        ; T-bit step
-$0084  TRAP #1           -> stub_breakpoint   ; SW BPs
-$00C4  Level-7 IRQ       -> stub_break        ; pause [SPECULATION]
+$0024  Trace exception   -> __stub_trace_entry    ; T-bit step
+$0084  TRAP #1           -> __stub_trap1_entry    ; SW BPs
 ```
 
-### 5.3 RAM layout
+The two entry-point addresses are emitted in a 16-byte header at the
+start of the blob (offsets 4 and 8). The host parses this header and
+writes the four-byte entry addresses verbatim into vectors `$24` and
+`$84`. No JMP-thunk synthesis required — on m68k the vector value
+**is** the target PC.
 
-Stub installed in the top of work RAM at boot (SGDK `_start` calls
-`mds_stub_init` before `main`):
+### 5.4 Blob layout
+
+Linked at `$FF8000` (low end of "upper" work RAM — leaves SGDK heap
+room below and stack room above). Single section, 16-byte header
+followed by code + rodata + zeroed BSS.
 
 ```
-$FF8000   stub code      (~4 KB, position-independent)
-$FF8FFC   stub stack top (grows down to ~$FF8C00)
-$FF9000   bp_table[]     (32 entries × 8 bytes: addr u32 + orig_word u16 + flags u16)
-$FF9100   reg_save       (D0..D7 A0..A7 SR PC = 18 longs = 72 bytes)
-$FF9148   rsp_buf_in     (512 bytes)
-$FF9348   rsp_buf_out    (512 bytes)
-$FF9548   step_state     (FSM byte: idle/single/cont)
+$FF8000   header (16 B):
+            +0x00  u32  MAGIC = 'MDST' (0x4D445354)
+            +0x04  u32  entry_trace      = $FF8C4C (current build)
+            +0x08  u32  entry_trap1      = $FF8C68 (current build)
+            +0x0C  u32  reserved         = 0
+$FF8010   .text + .rodata (~3.4 KB)
+$FF8D54   __bss_start
+$FF9558   rsp_in_raw    (1024 B) — inbound RSP frame buffer
+$FF9158   rsp_in_payload(1024 B) — decoded payload
+$FF8D58   rsp_out       (1024 B) — outbound encoded frame
+$FF9958   g_bps[32]     (256 B)  — BP table mirror
+$FF9A58   mds_regs[18]  (72 B)   — exception register save
+$FF9AA0   __bss_end / __stub_end
 ```
 
-GDB register layout for `g`/`G` on plain m68k (no FPU): 18 longs = 72 bytes,
-order `D0 D1..D7 A0..A7 SR PC`. Match `gdb -ex 'set arch m68k:68000'`.
+Total flat-bin size: ~6.8 KB (text + zeroed BSS — host MEM_WRs the
+whole thing in one shot, so the stub's static buffers are clean on
+first exception).
 
-### 5.4 RSP-over-FIFO
+GDB register layout for `g` / `G` on plain m68k (no FPU): 18 longs =
+72 bytes, order `D0..D7 A0..A6 USP SR PC`. Matches
+`gdb -ex 'set arch m68k:68000'`.
 
-Stub speaks raw RSP bytes into `$A130D0`; host serial sees the RSP stream
-verbatim; `scripts/gdb-proxy.py` already does the TCP↔serial passthrough.
-The stub still wraps each outbound RSP packet in a `USB_WR` envelope
-(MCU only forwards `USB_WR` payloads — §4.4), but the RSP layer itself
-doesn't see the framing.
+### 5.5 RSP-over-FIFO
 
-`qSupported` reply: `PacketSize=400;qXfer:features:read-`. Acks (`+`/`-`)
-enabled.
+Stub speaks raw RSP bytes into `$A130D0`; host serial sees the RSP
+stream verbatim. `scripts/gdb-proxy.py` already does the TCP↔serial
+passthrough for external GDB sessions.
 
-### 5.5 License
+Whether the stub also needs to wrap each outbound RSP packet in a
+`USB_WR` envelope (MCU forwarding rules — §4.4) is open question
+§10.Q1; the current stub writes raw RSP into the FIFO, and we'll add
+the envelope only if hardware bring-up shows it's needed.
 
-**Do not** copy `crossbridge gdb-7.3/gdb/m68k-stub.c` (GPLv2). Linking it into
-a user ROM contaminates the ROM. M5 stub is **cleanroom** built on top of
-[mborgerson/gdbstub](https://github.com/mborgerson/gdbstub) (MIT) — that gives
-us packet framing / checksum / escape; the m68k-specific glue (TRAP #1 patch
-table, T-bit FSM, exception save/restore in asm) is written from scratch
-based on the public m68k programmer's reference and the design table above.
-Crossbridge is reference-only.
+`qSupported` reply: `PacketSize=400;swbreak+;qXfer:features:read-`.
+Acks (`+`/`-`) enabled until `QStartNoAckMode` is acknowledged.
+
+### 5.6 Host connect sequence
+
+End-to-end attach flow, all driven from `mds-mcp`:
+
+1. `HOST_RST` (mode = soft) — halts the 68k.
+2. `MEM_WR` `mdsstub.bin` to `$FF8000` (whole file, including pre-zeroed BSS).
+3. Read header bytes [4..12] from the blob → two u32 entry addresses.
+4. `MEM_WR` 4 bytes (`entry_trace`) to `$00000024`.
+5. `MEM_WR` 4 bytes (`entry_trap1`) to `$00000084`.
+6. (Optional) plant a BP at user `main`.
+7. `HOST_RST` (mode = off) — releases CPU; user ROM runs from reset.
+8. Wait for first stop reply, then `qSupported` / `QStartNoAckMode`.
+
+The stub does **no** initialisation. There is no `mds_stub_init()` —
+the host configures everything before allowing the CPU to execute its
+first user instruction.
 
 ---
 
@@ -258,19 +319,20 @@ mds-mcp/tests/
   edpro_golden.rs  — replay captured frames against MockUsb
   rsp_codec.rs     — pure-function unit tests for rsp.rs
 
-mds-stub-68k/        — separate C library, target m68k-elf-gcc (NOT Rust)
+mds-stub-68k/        — standalone 68k blob, target m68k-elf-gcc (NOT Rust)
   Makefile         — m68k-elf-gcc -m68000 -Os -nostdlib -ffreestanding
+                     -T mdsstub.ld; objcopy -O binary
+  mdsstub.ld       — linker script: single .stub section at $FF8000
   src/
+    entry.s        — 16-byte header + Trace / TRAP #1 entry thunks
+    save_regs.s    — exception-frame register save / restore
     stub.c         — RSP dispatcher (cleanroom on mborgerson/gdbstub MIT)
-    rsp.c          — RSP packet enc/dec (wire-compatible w/ mds-mcp/rsp.rs)
-    usb.c          — $A130D0/D2 FIFO read/write
-    bp.c           — patch table, atomic write of TRAP #1 word
-    vectors.s      — overrides $24, $84, $C4 (m68k-elf-as)
-    save_regs.s    — exception-frame save/restore macro
-  include/
-    mds_stub.h     — public API: mds_stub_init()
-  link.ld.frag     — vector overrides for SGDK linker
-  README.md
+    rsp.{c,h}      — RSP packet enc/dec (wire-compatible w/ mds-mcp/rsp.rs)
+    usb.{c,h}      — $A130D0/D2 FIFO read/write
+    bp.{c,h}       — local BP table mirror
+  README.md        — load addr, entry convention, host connect sequence
+  → mdsstub.bin    — flat 68k binary, host-uploadable via MEM_WR
+  → mdsstub.elf    — same content with symbols (debugging only)
 ```
 
 **Why C, not Rust:** m68k has no upstream Rust tier-1/2 target. Custom
@@ -279,12 +341,10 @@ reference is C anyway → cleanroom port w/o language barrier; `m68k-elf-gcc`
 already in marsdev bundle (used by SGDK); smaller binary (no `core` bloat);
 hand-rolled buffers cheap when no allocator.
 
-`mds-stub-68k` builds as a static `libmdsstub.a` linked into the user ROM
-by SGDK. User adds `LIBS += -lmdsstub` + `LDFLAGS += -T mds_stub_vectors.ld`
-to their Makefile + calls `mds_stub_init()` at start of `main()`. The
-vector patcher is a build-time linker fragment that rewrites the four
-vector longs in the ROM image before the final `hex2bin`. Runtime vector
-patching is impossible on 68000 (no VBR); build-time is the only path.
+**Why standalone blob, not a static library:** see §5.1. The user ROM
+has no idea the stub exists; the host installs it via `MEM_WR` against
+work RAM + the vector slots in PSRAM. No linker fragment, no `init()`
+call, no public C API.
 
 ---
 
@@ -349,12 +409,12 @@ hand to validate". Items 1–12 + 14–15 are testable against `MockUsb` only;
 |  6  | Tool-to-RSP dispatcher (`g`/`G`/`m`/`M`/`c`/`s`/`Z0`/`z0`) | `mds-mcp/src/target/edpro/mod.rs`, `mds-mcp/src/tools/mod.rs` (modify) | 4, 5 | no  |
 |  7  | Host-side BP table mirror, atomic patch/restore protocol   | `mds-mcp/src/target/edpro/stub_sync.rs` (new)              | 6          | no  |
 |  8  | T-bit step state machine (single-shot trace expected)      | `mds-mcp/src/target/edpro/stub_sync.rs`                    | 6          | no  |
-|  9  | 68k stub C library skeleton (m68k-elf-gcc)                 | `mds-stub-68k/Makefile`, `mds-stub-68k/src/{stub,rsp,usb,bp}.c`, `vectors.s` (new) | — | no  |
-| 10  | Vector patcher (linker fragment, build-time)               | `mds-stub-68k/link.ld.frag` (new)                          | 9          | no  |
+|  9  | 68k stub binary blob (m68k-elf-gcc)                        | `mds-stub-68k/Makefile`, `src/{stub,rsp,usb,bp}.c`, `entry.s`, `mdsstub.ld` | — | no  |
+| 10  | Host-side blob deployer (MEM_WR upload + vector patch)     | `mds-mcp/src/target/edpro/{stub_blob,mod}.rs`              | 4, 9       | partial (real-USB only on hw) |
 | 11  | KDebug-over-USB shim (replaces SGDK `KDebug_Alert`)        | `mds-stub-68k/src/kdebug.s` (new), SGDK link patch         | 9          | partial (SGDK weak-link Q) |
 | 12  | Host `kdebug_monitor` MCP tool                             | `mds-mcp/src/tools/mod.rs` (modify)                        | 4          | no  |
 | 13  | E2E smoke test (upload, kprintf, BP hit, single-step)      | `mds-mcp/tests/edpro_e2e.rs` (new)                         | 1–12       | **yes** |
-| 14  | Pause-via-host: design IRQ7 trigger from MCU writes        | `mds-stub-68k/src/vectors.s`, host `pause` impl            | 9          | yes (mechanism unknown — §10) |
+| 14  | Pause-via-host: design IRQ7 trigger from MCU writes        | `mds-stub-68k/src/entry.s`, host `pause` impl              | 9          | yes (mechanism unknown — §10) |
 | 15  | Polled watchpoint (during T-bit step)                      | `mds-stub-68k/src/bp.c`, `stub_sync.rs`                    | 7, 8       | partial (perf tuning) |
 | 16  | Refactor `scripts/gdb-proxy.py` into mds-mcp tool surface  | `mds-mcp/src/target/edpro/proxy.rs` (new)                  | 5          | no  |
 

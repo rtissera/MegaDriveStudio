@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: MIT
-//! Build script: generates Rust FFI bindings for libra (../vendor/libra).
+//! Build script: generates Rust FFI bindings for libra (../vendor/libra),
+//! and ensures the on-cart 68k debug stub blob (`../mds-stub-68k/mdsstub.bin`)
+//! is built so that `target::edpro::stub_blob::STUB_BLOB`'s
+//! `include_bytes!` succeeds.
 //!
 //! When the libra header / library aren't yet available (the parallel agent
 //! hasn't finished), we still emit a *complete* but synthetic stub
@@ -7,10 +10,18 @@
 //! `libra_present` only when bindgen produced real bindings; downstream
 //! modules use `#[cfg(libra_present)]` to switch between live FFI and the
 //! safe-no-op fallback.
+//!
+//! For the 68k stub: if `m68k-elf-gcc` isn't on PATH and the marsdev
+//! toolchain isn't at `~/mars`, we write a 32-byte placeholder blob with
+//! the correct magic + entries pointing back into the placeholder so the
+//! Rust crate still compiles. This keeps `cargo check` working in
+//! environments without the cross-toolchain. Production builds set
+//! `MDS_STUB_REQUIRE_REAL=1` to fail loud on placeholder fallback.
 
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 const STUB_BINDINGS: &str = r#"// SPDX-License-Identifier: MIT
 // Stub bindings — libra header was not present at build time.
@@ -32,10 +43,84 @@ pub struct libra_config_t {
 }
 "#;
 
+/// Synthetic 32-byte placeholder blob, used when the real m68k toolchain
+/// isn't available so `cargo check` / `cargo build` still succeed.
+///
+/// Layout matches `parse_header` in `target::edpro::stub_blob`:
+/// MAGIC ('MDST'), entry_trace, entry_trap1, reserved=0, then 16 bytes
+/// of NOPs (`0x4E71` repeated). Both entry points are set to the load
+/// address itself — the placeholder will trigger an unimplemented-trap
+/// loop if anyone ever tries to actually run it on hardware, which is
+/// the desired loud failure mode.
+const PLACEHOLDER_LOAD_ADDR: u32 = 0x00FF_8000;
+
+fn write_placeholder_stub(out: &Path) -> std::io::Result<()> {
+    let mut blob = Vec::with_capacity(32);
+    blob.extend_from_slice(&0x4D44_5354u32.to_be_bytes()); // 'MDST'
+    blob.extend_from_slice(&PLACEHOLDER_LOAD_ADDR.to_be_bytes());
+    blob.extend_from_slice(&PLACEHOLDER_LOAD_ADDR.to_be_bytes());
+    blob.extend_from_slice(&0u32.to_be_bytes()); // reserved
+    for _ in 0..8 {
+        blob.extend_from_slice(&0x4E71u16.to_be_bytes()); // NOP
+    }
+    fs::write(out, &blob)
+}
+
+fn build_stub_blob(stub_dir: &Path) -> bool {
+    // Try `make` against the stub Makefile. We deliberately don't pass -j
+    // because the build is tiny and noise-free.
+    let status = Command::new("make")
+        .current_dir(stub_dir)
+        .arg("all")
+        .status();
+    match status {
+        Ok(s) => s.success(),
+        Err(_) => false,
+    }
+}
+
+fn ensure_stub_blob(manifest_dir: &Path) {
+    let stub_dir = manifest_dir.join("../mds-stub-68k");
+    let bin = stub_dir.join("mdsstub.bin");
+
+    println!("cargo:rerun-if-changed={}", stub_dir.join("Makefile").display());
+    println!("cargo:rerun-if-changed={}", stub_dir.join("mdsstub.ld").display());
+    if let Ok(entries) = fs::read_dir(stub_dir.join("src")) {
+        for e in entries.flatten() {
+            println!("cargo:rerun-if-changed={}", e.path().display());
+        }
+    }
+    println!("cargo:rerun-if-env-changed=MDS_STUB_REQUIRE_REAL");
+
+    let require_real = env::var("MDS_STUB_REQUIRE_REAL").is_ok();
+
+    if stub_dir.exists() && build_stub_blob(&stub_dir) && bin.exists() {
+        // Real build succeeded.
+        return;
+    }
+
+    if require_real {
+        panic!(
+            "MDS_STUB_REQUIRE_REAL is set but mds-stub-68k build failed (m68k-elf-gcc missing or stub source error). Run `make -C mds-stub-68k` manually to debug."
+        );
+    }
+
+    // Fall back to a placeholder so `cargo check` works on machines without
+    // the m68k toolchain. The Rust side surfaces this clearly: STUB_BLOB
+    // will still parse, but the entry points point at the placeholder
+    // itself rather than real handler code.
+    println!("cargo:warning=mds-stub-68k toolchain unavailable; writing placeholder mdsstub.bin (set MDS_STUB_REQUIRE_REAL=1 to enforce real build)");
+    if let Err(e) = write_placeholder_stub(&bin) {
+        panic!("failed to write placeholder stub blob to {}: {e}", bin.display());
+    }
+}
+
 fn main() {
     println!("cargo::rustc-check-cfg=cfg(libra_present)");
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+
+    ensure_stub_blob(&manifest_dir);
     let header = manifest_dir.join("../vendor/libra/include/libra.h");
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let bindings_out = out_dir.join("bindings.rs");

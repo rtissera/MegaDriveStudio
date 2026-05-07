@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //
-// bp.c — fixed-size BP table. Cleanroom; no malloc.
+// bp.c — fixed-size breakpoint table. No malloc.
 
 #include "bp.h"
 
@@ -28,9 +28,9 @@ static int find_free(void) {
 }
 
 int mds_bp_set(uint32_t addr) {
-    if (find_slot(addr) >= 0) return -1;        // already set
+    if (find_slot(addr) >= 0) return -1;
     int slot = find_free();
-    if (slot < 0) return -1;                    // table full
+    if (slot < 0) return -1;
     volatile uint16_t *p = (volatile uint16_t *)(uintptr_t)addr;
     g_bps[slot].addr   = addr;
     g_bps[slot].orig   = *p;
@@ -56,8 +56,6 @@ int mds_bp_lookup(uint32_t addr, uint16_t *orig_out) {
 }
 
 int mds_bp_restore_at(uint32_t pc) {
-    // After `TRAP #1`, the saved PC points just past the trap word.
-    // Patched-site address is therefore pc - 2.
     uint32_t addr = pc - 2u;
     int slot = find_slot(addr);
     if (slot < 0) return -1;

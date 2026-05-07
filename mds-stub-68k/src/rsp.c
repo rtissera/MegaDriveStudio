@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //
-// rsp.c — GDB RSP codec. Wire-compatible w/ mds-mcp/src/target/edpro/rsp.rs.
+// rsp.c — GDB RSP codec. Wire-compatible with mds-mcp/src/target/edpro/rsp.rs.
 // Cleanroom on mborgerson/gdbstub (MIT). No malloc, no globals.
 
 #include "rsp.h"
@@ -73,8 +73,6 @@ static uint8_t xor_checksum(const uint8_t *p, size_t n) {
 
 size_t rsp_encode_packet(const uint8_t *payload, size_t plen,
                          uint8_t *out, size_t cap) {
-    // We escape inline while computing csum on the *escaped* bytes (matches
-    // rsp.rs: csum is over already-escaped payload).
     if (cap < 4) return 0;          // need at least "$#xx"
     size_t pos = 0;
     out[pos++] = '$';
@@ -103,11 +101,9 @@ size_t rsp_encode_packet(const uint8_t *payload, size_t plen,
 
 rsp_err_t rsp_decode_packet(const uint8_t *in, size_t in_len,
                             uint8_t *out, size_t cap, size_t *out_len) {
-    // Find '$'.
     size_t start = 0;
     while (start < in_len && in[start] != '$') start++;
     if (start >= in_len) return RSP_NO_PACKET;
-    // Find '#' after start.
     size_t hash = start + 1;
     while (hash < in_len && in[hash] != '#') hash++;
     if (hash >= in_len) return RSP_UNTERMINATED;
@@ -121,7 +117,6 @@ rsp_err_t rsp_decode_packet(const uint8_t *in, size_t in_len,
     uint8_t got = (uint8_t)((hi << 4) | lo);
     if (got != expected) return RSP_BAD_CHECKSUM;
 
-    // Reverse escapes + expand RLE into `out`.
     size_t op = 0;
     size_t i = 0;
     while (i < raw_len) {
