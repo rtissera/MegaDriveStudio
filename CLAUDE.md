@@ -115,7 +115,7 @@ make debug 2>&1 | python3 scripts/claude-build-assist.py --no-skills --caveman
 
 - Protocol USB différent du X7 (wrapping de commandes)
 - Outil : megalink-rs (`cargo install megalink`)
-- KDebug hardware : ROM doit écrire via $A130E2 (SSF mapper USB register)
+- KDebug hardware : ROM doit écrire via $A130D0 (USB FIFO data). Status à $A130D2, sys status à $A130D4. ⚠️ $A130E2 = SSF mapper bank register, RIEN à voir avec USB. SGDK `KDebug_Alert` écrit $C00004 (Gens KMod $9E00) = emulator-only, no-op sur hardware réel. Voir krikzz/mega-ed-pub + extended-ssf.txt.
 - GDB stub hardware : custom 68k stub (voir scripts/stub/) + proxy RSP (scripts/gdb-proxy.py)
 
 ## Conventions de code

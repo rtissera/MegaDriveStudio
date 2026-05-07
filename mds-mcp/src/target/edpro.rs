@@ -8,12 +8,19 @@
 //! every other tool.
 //!
 //! TODO M5.1: implement USB framing.
-//!   - KDebug stream via SSF mapper $A130E2 (writes from the running ROM
-//!     show up on the USB endpoint as ASCII frames).
-//!   - 68k debug stub linked into the user's ROM, exposing register dump,
-//!     single-step (T-bit trace exception), and exec breakpoints by
-//!     opcode-patching with TRAP. See scripts/gdb-proxy.py for the host
-//!     side of an RSP-over-USB framing the stub can serve.
+//!   - EdPro USB FIFO is at $A130D0 (data) / $A130D2 (status) /
+//!     $A130D4 (sys status). NOT $A130E2 (that's the SSF mapper bank
+//!     register, unrelated to USB). KDebug-over-USB requires explicit
+//!     ROM-side writes to $A130D0; SGDK's KDebug_Alert writes $C00004
+//!     (Gens KMod $9E00) which is emulator-only and a no-op on hardware.
+//!   - 68k debug stub linked into the user's ROM. 68000 has no VBR, so
+//!     vectors $24 (Trace) + $84 (TRAP #1) must be patched at link time
+//!     to a RAM stub. Hybrid TRAP #1 software BPs + T-bit single-step.
+//!     See scripts/gdb-proxy.py for the host-side TCP↔serial passthrough.
+//!   - Host protocol (krikzz/mega-ed-pub + ricky26/megalink-rs):
+//!     4-byte cmd framing `+ ~+ CMD ~CMD`. Opcodes: status 0x10,
+//!     mem_rd 0x19, mem_wr 0x1A, usb_wr 0x22, host_rst 0x29.
+//!     ACK-throttled 1024-byte chunks for ROM-area writes.
 //!   - Reuse the `Target` enum so the IDE doesn't change.
 //!
 //! See docs/01-architecture.md and CLAUDE.md "Notes Mega Everdrive Pro".
