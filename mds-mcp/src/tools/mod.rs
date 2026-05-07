@@ -19,6 +19,31 @@ use crate::emulator::{
 use crate::server::MdsServer;
 use crate::target::{TargetKind, NOT_SUPPORTED};
 
+/// Classify an `anyhow::Error` from an `EdProTarget` method into a
+/// structured MCP response. EdProTarget conventions:
+///
+/// - `sync_mut()` returns `"{NOT_SUPPORTED}: edpro target not connected"`
+///   when no transport is wired (string contains both sentinels). M5.6
+///   surfaces this as `reason: "not_connected"` so callers can branch.
+/// - Permanently-unsupported / TODO-stub methods bail with a string that
+///   contains `NOT_SUPPORTED` (no "not connected") → `not_supported_on_target`.
+/// - Anything else is a real I/O / decode failure → `err_text`.
+fn classify_edpro_err(tool: &str, err: &anyhow::Error) -> CallToolResult {
+    let msg = err.to_string();
+    if msg.contains("not connected") {
+        ok_json(serde_json::json!({
+            "ok": false,
+            "reason": "not_connected",
+            "tool": tool,
+            "message": format!("{tool}: edpro target not connected"),
+        }))
+    } else if msg.contains(NOT_SUPPORTED) {
+        not_supported_on_target(tool)
+    } else {
+        err_text(format!("{tool} failed: {msg}"))
+    }
+}
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct LoadRomArgs {
     /// Absolute path to the ROM file (.bin/.md/.gen).
@@ -178,15 +203,14 @@ fn not_supported_on_target(tool: &str) -> CallToolResult {
 }
 
 impl MdsServer {
-    /// Returns `Some(not_supported)` if the current target is EdPro,
-    /// otherwise `None` and the caller proceeds. Lets emulator-only tools
-    /// short-circuit without an early-return per tool.
-    fn block_on_edpro(&self, tool: &'static str) -> Option<CallToolResult> {
-        if self.target_kind() == TargetKind::EdPro {
-            Some(not_supported_on_target(tool))
-        } else {
-            None
-        }
+    /// True iff the active target is EdPro. The dispatcher uses this to
+    /// route a tool call to `EdProTarget` instead of the emulator actor.
+    /// M5.6 removed the per-tool `block_on_edpro` short-circuit:
+    /// `EdProTarget` itself returns `not_supported_on_target` (or
+    /// `not_connected`) on a per-method basis, which lets future M5.7+
+    /// wiring switch tools from stub to wired without touching this file.
+    fn is_edpro(&self) -> bool {
+        self.target_kind() == TargetKind::EdPro
     }
 }
 fn err_text(msg: impl Into<String>) -> CallToolResult {
@@ -207,7 +231,14 @@ impl MdsServer {
         &self,
         Parameters(args): Parameters<LoadRomArgs>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        if let Some(r) = self.block_on_edpro("mega_load_rom") { return Ok(r); }
+        if self.is_edpro() {
+            let lock = self.edpro_target();
+            let mut t = lock.lock().await;
+            return Ok(match t.load_rom(std::path::Path::new(&args.path)).await {
+                Ok(()) => ok_json(serde_json::json!({"ok": true})),
+                Err(e) => classify_edpro_err("mega_load_rom", &e),
+            });
+        }
         let r = self.actor().load_rom(PathBuf::from(args.path)).await;
         Ok(match r {
             Ok(info) => ok_json(serde_json::json!({
@@ -223,7 +254,14 @@ impl MdsServer {
 
     #[tool(description = "Unload the currently loaded ROM and reset emulator state.")]
     async fn mega_unload_rom(&self) -> Result<CallToolResult, rmcp::ErrorData> {
-        if let Some(r) = self.block_on_edpro("mega_unload_rom") { return Ok(r); }
+        if self.is_edpro() {
+            let lock = self.edpro_target();
+            let mut t = lock.lock().await;
+            return Ok(match t.unload_rom().await {
+                Ok(()) => ok_json(serde_json::json!({"ok": true})),
+                Err(e) => classify_edpro_err("mega_unload_rom", &e),
+            });
+        }
         Ok(match self.actor().unload_rom().await {
             Ok(()) => ok_json(serde_json::json!({"ok": true})),
             Err(e) => err_text(format!("unload_rom failed: {e}")),
@@ -232,7 +270,14 @@ impl MdsServer {
 
     #[tool(description = "Pause the emulator. Returns the current frame counter.")]
     async fn mega_pause(&self) -> Result<CallToolResult, rmcp::ErrorData> {
-        if let Some(r) = self.block_on_edpro("mega_pause") { return Ok(r); }
+        if self.is_edpro() {
+            let lock = self.edpro_target();
+            let mut t = lock.lock().await;
+            return Ok(match t.pause().await {
+                Ok(()) => ok_json(serde_json::json!({"ok": true})),
+                Err(e) => classify_edpro_err("mega_pause", &e),
+            });
+        }
         Ok(match self.actor().pause().await {
             Ok(frame) => ok_json(serde_json::json!({"ok": true, "frame": frame})),
             Err(e) => err_text(format!("pause failed: {e}")),
@@ -241,7 +286,14 @@ impl MdsServer {
 
     #[tool(description = "Resume the emulator. Returns the current frame counter.")]
     async fn mega_resume(&self) -> Result<CallToolResult, rmcp::ErrorData> {
-        if let Some(r) = self.block_on_edpro("mega_resume") { return Ok(r); }
+        if self.is_edpro() {
+            let lock = self.edpro_target();
+            let mut t = lock.lock().await;
+            return Ok(match t.resume().await {
+                Ok(()) => ok_json(serde_json::json!({"ok": true})),
+                Err(e) => classify_edpro_err("mega_resume", &e),
+            });
+        }
         Ok(match self.actor().resume().await {
             Ok(frame) => ok_json(serde_json::json!({"ok": true, "frame": frame})),
             Err(e) => err_text(format!("resume failed: {e}")),
@@ -253,7 +305,15 @@ impl MdsServer {
         &self,
         Parameters(args): Parameters<StepFrameArgs>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        if let Some(r) = self.block_on_edpro("mega_step_frame") { return Ok(r); }
+        if self.is_edpro() {
+            let lock = self.edpro_target();
+            let mut t = lock.lock().await;
+            let n = args.n.unwrap_or(1);
+            return Ok(match t.step_frame(n).await {
+                Ok(()) => ok_json(serde_json::json!({"ok": true})),
+                Err(e) => classify_edpro_err("mega_step_frame", &e),
+            });
+        }
         let n = args.n.unwrap_or(1).min(10_000);
         Ok(match self.actor().step_frame(n).await {
             Ok(frame) => ok_json(serde_json::json!({"ok": true, "frame": frame})),
@@ -266,7 +326,21 @@ impl MdsServer {
         &self,
         Parameters(args): Parameters<StepInstructionArgs>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        if let Some(r) = self.block_on_edpro("mega_step_instruction") { return Ok(r); }
+        if self.is_edpro() {
+            // EdPro stub steps a single 68k instruction per RSP `s`. `n`
+            // is not honoured yet (would need a host-side loop); future
+            // milestone may hoist it once continue+stop-pump is wired.
+            let lock = self.edpro_target();
+            let mut t = lock.lock().await;
+            return Ok(match t.step_instruction().await {
+                Ok(stop) => ok_json(serde_json::json!({
+                    "ok": true,
+                    "stop_reply": format!("{stop:?}"),
+                    "granularity": "instruction",
+                })),
+                Err(e) => classify_edpro_err("mega_step_instruction", &e),
+            });
+        }
         let n = args.n.unwrap_or(1).clamp(1, 1_000_000);
         Ok(match self.actor().step_instruction(n).await {
             Ok(out) => ok_json(serde_json::json!({
@@ -286,7 +360,26 @@ impl MdsServer {
         &self,
         Parameters(args): Parameters<ReadMemoryArgs>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        if let Some(r) = self.block_on_edpro("mega_read_memory") { return Ok(r); }
+        if self.is_edpro() {
+            // EdPro side has a flat 24-bit M68k address space — `space`
+            // is informational only (the on-cart stub doesn't switch
+            // based on it). We pass `addr` straight through to the RSP
+            // `m` packet.
+            let lock = self.edpro_target();
+            let mut t = lock.lock().await;
+            return Ok(match t.read_memory(args.addr, args.length).await {
+                Ok(bytes) => {
+                    let res = ReadMemoryResult {
+                        addr: args.addr,
+                        length: args.length,
+                        space: args.space,
+                        data: B64.encode(&bytes),
+                    };
+                    ok_json(serde_json::to_value(&res).unwrap_or_default())
+                }
+                Err(e) => classify_edpro_err("mega_read_memory", &e),
+            });
+        }
         let Some(space) = MemorySpace::parse(&args.space) else {
             return Ok(err_text(format!("unknown memory space: {:?}", args.space)));
         };
@@ -315,7 +408,18 @@ impl MdsServer {
         &self,
         Parameters(args): Parameters<WriteMemoryArgs>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        if let Some(r) = self.block_on_edpro("mega_write_memory") { return Ok(r); }
+        if self.is_edpro() {
+            let bytes = match B64.decode(args.data.as_bytes()) {
+                Ok(b) => b,
+                Err(e) => return Ok(err_text(format!("invalid base64: {e}"))),
+            };
+            let lock = self.edpro_target();
+            let mut t = lock.lock().await;
+            return Ok(match t.write_memory(args.addr, &bytes).await {
+                Ok(()) => ok_json(serde_json::json!({"ok": true})),
+                Err(e) => classify_edpro_err("mega_write_memory", &e),
+            });
+        }
         let Some(space) = MemorySpace::parse(&args.space) else {
             return Ok(err_text(format!("unknown memory space: {:?}", args.space)));
         };
@@ -331,7 +435,20 @@ impl MdsServer {
 
     #[tool(description = "Get the 24 VDP registers and a decoded summary (planes, sprite table, H40/V30, ...).")]
     async fn mega_get_vdp_registers(&self) -> Result<CallToolResult, rmcp::ErrorData> {
-        if let Some(r) = self.block_on_edpro("mega_get_vdp_registers") { return Ok(r); }
+        if self.is_edpro() {
+            // EdPro reads 24 raw bytes from the VDP control port
+            // ($C00004); we surface them as the same `decode_vdp_registers`
+            // shape the emulator path uses so callers see one schema.
+            let lock = self.edpro_target();
+            let mut t = lock.lock().await;
+            return Ok(match t.get_vdp_registers().await {
+                Ok(blob) => {
+                    let regs = decode::decode_vdp_registers(&blob);
+                    ok_json(serde_json::to_value(&regs).unwrap_or_default())
+                }
+                Err(e) => classify_edpro_err("mega_get_vdp_registers", &e),
+            });
+        }
         let blob = self
             .actor()
             .snapshot_region(MemorySpace::VdpState)
@@ -343,7 +460,14 @@ impl MdsServer {
 
     #[tool(description = "Get the four 16-colour palette lines as RGB triplets (CRAM 9-bit BGR expanded to 8-bit).")]
     async fn mega_get_palettes(&self) -> Result<CallToolResult, rmcp::ErrorData> {
-        if let Some(r) = self.block_on_edpro("mega_get_palettes") { return Ok(r); }
+        if self.is_edpro() {
+            let lock = self.edpro_target();
+            let mut t = lock.lock().await;
+            return Ok(match t.get_palettes().await {
+                Ok(_) => ok_json(serde_json::json!({"ok": true})),
+                Err(e) => classify_edpro_err("mega_get_palettes", &e),
+            });
+        }
         let cram = self
             .actor()
             .snapshot_region(MemorySpace::Cram)
@@ -355,7 +479,14 @@ impl MdsServer {
 
     #[tool(description = "Decode the sprite attribute table (up to 80 sprites). Walks the linked list from VDP reg #5.")]
     async fn mega_get_sprites(&self) -> Result<CallToolResult, rmcp::ErrorData> {
-        if let Some(r) = self.block_on_edpro("mega_get_sprites") { return Ok(r); }
+        if self.is_edpro() {
+            let lock = self.edpro_target();
+            let mut t = lock.lock().await;
+            return Ok(match t.get_sprites().await {
+                Ok(_) => ok_json(serde_json::json!({"ok": true})),
+                Err(e) => classify_edpro_err("mega_get_sprites", &e),
+            });
+        }
         let vdp = self
             .actor()
             .snapshot_region(MemorySpace::VdpState)
@@ -376,7 +507,14 @@ impl MdsServer {
         &self,
         Parameters(args): Parameters<DumpTileArgs>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        if let Some(r) = self.block_on_edpro("mega_dump_tile") { return Ok(r); }
+        if self.is_edpro() {
+            let lock = self.edpro_target();
+            let mut t = lock.lock().await;
+            return Ok(match t.dump_tile(args.index).await {
+                Ok(_) => ok_json(serde_json::json!({"ok": true})),
+                Err(e) => classify_edpro_err("mega_dump_tile", &e),
+            });
+        }
         let format = args.format.as_deref().unwrap_or("8x8");
         let palette_idx = args.palette.unwrap_or(0).min(3);
         let vram = self
@@ -420,7 +558,21 @@ impl MdsServer {
 
     #[tool(description = "Decode the 68k registers (D0..D7, A0..A7, PC, SR, USP, SSP) from the m68k_state blob.")]
     async fn mega_get_68k_registers(&self) -> Result<CallToolResult, rmcp::ErrorData> {
-        if let Some(r) = self.block_on_edpro("mega_get_68k_registers") { return Ok(r); }
+        if self.is_edpro() {
+            let lock = self.edpro_target();
+            let mut t = lock.lock().await;
+            return Ok(match t.get_68k_registers().await {
+                Ok(r) => ok_json(serde_json::json!({
+                    "d": r.d,
+                    "a": r.a,
+                    "pc": r.pc,
+                    "sr": r.sr,
+                    "usp": r.usp,
+                    "ssp": r.ssp,
+                })),
+                Err(e) => classify_edpro_err("mega_get_68k_registers", &e),
+            });
+        }
         let blob = self
             .actor()
             .snapshot_region(MemorySpace::M68kState)
@@ -436,7 +588,14 @@ impl MdsServer {
 
     #[tool(description = "Decode the Z80 registers from the Z80 state blob plus the bus state blob. Returns {af, bc, de, hl, ix, iy, pc, sp, halt, iff1, iff2, im, cycles, bus_requested, bus_reset}.")]
     async fn mega_get_z80_registers(&self) -> Result<CallToolResult, rmcp::ErrorData> {
-        if let Some(r) = self.block_on_edpro("mega_get_z80_registers") { return Ok(r); }
+        if self.is_edpro() {
+            let lock = self.edpro_target();
+            let mut t = lock.lock().await;
+            return Ok(match t.get_z80_registers().await {
+                Ok(()) => ok_json(serde_json::json!({"ok": true})),
+                Err(e) => classify_edpro_err("mega_get_z80_registers", &e),
+            });
+        }
         let state_blob = self
             .actor()
             .snapshot_region(MemorySpace::Z80)
@@ -460,7 +619,20 @@ impl MdsServer {
         &self,
         Parameters(args): Parameters<BreakpointArgs>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        if let Some(r) = self.block_on_edpro("mega_set_breakpoint") { return Ok(r); }
+        if self.is_edpro() {
+            // EdPro patch-style BPs are exec-only (TRAP #1 word). `kind`
+            // and `space` aren't honoured yet; future milestone may
+            // reject non-exec or fall back to RSP `Z` packets.
+            let Some(addr) = args.addr else {
+                return Ok(err_text("missing required field: addr"));
+            };
+            let lock = self.edpro_target();
+            let mut t = lock.lock().await;
+            return Ok(match t.set_breakpoint(addr).await {
+                Ok(()) => ok_json(serde_json::json!({"ok": true, "addr": addr})),
+                Err(e) => classify_edpro_err("mega_set_breakpoint", &e),
+            });
+        }
         let Some(addr) = args.addr else {
             return Ok(err_text("missing required field: addr"));
         };
@@ -495,7 +667,18 @@ impl MdsServer {
         &self,
         Parameters(args): Parameters<ClearBreakpointArgs>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        if let Some(r) = self.block_on_edpro("mega_clear_breakpoint") { return Ok(r); }
+        if self.is_edpro() {
+            // EdPro tracks BPs by 24-bit address rather than the
+            // host-side opaque id used by the emulator. Until a future
+            // milestone unifies the surface we treat `args.id` as the
+            // 68k address — same convention `set_breakpoint` echoes back.
+            let lock = self.edpro_target();
+            let mut t = lock.lock().await;
+            return Ok(match t.clear_breakpoint(args.id).await {
+                Ok(()) => ok_json(serde_json::json!({"ok": true, "removed": true})),
+                Err(e) => classify_edpro_err("mega_clear_breakpoint", &e),
+            });
+        }
         Ok(match self.actor().clear_breakpoint(args.id).await {
             Ok(removed) => ok_json(serde_json::json!({"ok": true, "removed": removed})),
             Err(e) => err_text(format!("clear_breakpoint failed: {e}")),
@@ -504,7 +687,29 @@ impl MdsServer {
 
     #[tool(description = "List active breakpoints. Returns {breakpoints: [{id, addr, kind, space, hit_count, enabled}, ...]}.")]
     async fn mega_list_breakpoints(&self) -> Result<CallToolResult, rmcp::ErrorData> {
-        if let Some(r) = self.block_on_edpro("mega_list_breakpoints") { return Ok(r); }
+        if self.is_edpro() {
+            // `list_breakpoints` is sync + non-erroring on EdPro — empty
+            // when disconnected, populated otherwise. We project addrs
+            // into the same `{id, addr, ...}` shape the emulator path
+            // emits (id == addr for EdPro patch-style BPs).
+            let lock = self.edpro_target();
+            let t = lock.lock().await;
+            let bps: Vec<serde_json::Value> = t
+                .list_breakpoints()
+                .into_iter()
+                .map(|addr| {
+                    serde_json::json!({
+                        "id": addr,
+                        "addr": addr,
+                        "kind": "exec",
+                        "space": "rom",
+                        "hit_count": 0,
+                        "enabled": true,
+                    })
+                })
+                .collect();
+            return Ok(ok_json(serde_json::json!({ "breakpoints": bps })));
+        }
         Ok(match self.actor().list_breakpoints().await {
             Ok(list) => ok_json(serde_json::json!({
                 "breakpoints": list,
@@ -515,7 +720,14 @@ impl MdsServer {
 
     #[tool(description = "Continue execution after a breakpoint halt. If the emulator isn't halted-on-BP, behaves like `mega_resume`. Returns the current frame counter.")]
     async fn mega_continue(&self) -> Result<CallToolResult, rmcp::ErrorData> {
-        if let Some(r) = self.block_on_edpro("mega_continue") { return Ok(r); }
+        if self.is_edpro() {
+            let lock = self.edpro_target();
+            let mut t = lock.lock().await;
+            return Ok(match t.continue_run().await {
+                Ok(()) => ok_json(serde_json::json!({"ok": true})),
+                Err(e) => classify_edpro_err("mega_continue", &e),
+            });
+        }
         Ok(match self.actor().continue_after_halt().await {
             Ok(frame) => ok_json(serde_json::json!({"ok": true, "frame": frame})),
             Err(e) => err_text(format!("continue failed: {e}")),
@@ -527,7 +739,14 @@ impl MdsServer {
         &self,
         Parameters(args): Parameters<ScreenshotArgs>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        if let Some(r) = self.block_on_edpro("mega_screenshot") { return Ok(r); }
+        if self.is_edpro() {
+            let lock = self.edpro_target();
+            let mut t = lock.lock().await;
+            return Ok(match t.screenshot().await {
+                Ok(_) => ok_json(serde_json::json!({"ok": true})),
+                Err(e) => classify_edpro_err("mega_screenshot", &e),
+            });
+        }
         let frame = match self.actor().screenshot().await {
             Ok(Some(f)) => f,
             Ok(None) => {
@@ -566,7 +785,14 @@ impl MdsServer {
         &self,
         Parameters(args): Parameters<StateSlotArgs>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        if let Some(r) = self.block_on_edpro("mega_save_state") { return Ok(r); }
+        if self.is_edpro() {
+            let lock = self.edpro_target();
+            let mut t = lock.lock().await;
+            return Ok(match t.save_state(args.slot.unwrap_or(0)).await {
+                Ok(()) => ok_json(serde_json::json!({"ok": true})),
+                Err(e) => classify_edpro_err("mega_save_state", &e),
+            });
+        }
         let slot = args.slot.unwrap_or(0);
         Ok(match self.actor().save_state(slot).await {
             Ok(size) => ok_json(serde_json::json!({"ok": true, "size": size})),
@@ -579,7 +805,14 @@ impl MdsServer {
         &self,
         Parameters(args): Parameters<StateSlotArgs>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        if let Some(r) = self.block_on_edpro("mega_load_state") { return Ok(r); }
+        if self.is_edpro() {
+            let lock = self.edpro_target();
+            let mut t = lock.lock().await;
+            return Ok(match t.load_state(args.slot.unwrap_or(0)).await {
+                Ok(()) => ok_json(serde_json::json!({"ok": true})),
+                Err(e) => classify_edpro_err("mega_load_state", &e),
+            });
+        }
         let slot = args.slot.unwrap_or(0);
         Ok(match self.actor().load_state(slot).await {
             Ok(()) => ok_json(serde_json::json!({"ok": true})),
@@ -589,7 +822,14 @@ impl MdsServer {
 
     #[tool(description = "Get emulator/hardware status: rom_loaded, paused, frame, fps_avg, target (\"emulator\" or \"edpro\"), libra_linked, connected (EdPro only).")]
     async fn mega_get_status(&self) -> Result<CallToolResult, rmcp::ErrorData> {
-        if self.target_kind() == TargetKind::EdPro {
+        if self.is_edpro() {
+            // Pull live status straight from `EdProTarget` so `connected`
+            // and `bp_count` reflect the wired state machine. We extend
+            // the target's compact JSON with the legacy fields the
+            // emulator path emits so existing UI consumers don't fork.
+            let lock = self.edpro_target();
+            let t = lock.lock().await;
+            let st = t.get_status();
             return Ok(ok_json(serde_json::json!({
                 "rom_loaded": false,
                 "paused": true,
@@ -597,8 +837,9 @@ impl MdsServer {
                 "fps_avg": 0.0,
                 "target": "edpro",
                 "libra_linked": cfg!(libra_present),
-                "connected": false,
-                "edpro_port": self.edpro_cfg().port.to_string_lossy(),
+                "connected": st["connected"].as_bool().unwrap_or(false),
+                "edpro_port": st["port"].as_str().unwrap_or("").to_string(),
+                "bp_count": st["bp_count"].as_u64().unwrap_or(0),
             })));
         }
         Ok(match self.actor().status().await {
@@ -620,7 +861,14 @@ impl MdsServer {
         &self,
         Parameters(args): Parameters<InputSetStateArgs>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        if let Some(r) = self.block_on_edpro("mega_input_set_state") { return Ok(r); }
+        if self.is_edpro() {
+            let lock = self.edpro_target();
+            let mut t = lock.lock().await;
+            return Ok(match t.input_set_state().await {
+                Ok(()) => ok_json(serde_json::json!({"ok": true})),
+                Err(e) => classify_edpro_err("mega_input_set_state", &e),
+            });
+        }
         let port = args.port.unwrap_or(0);
         let pairs = args.buttons.into_pairs();
         self.actor().input().apply_partial(port, &pairs);
@@ -632,7 +880,14 @@ impl MdsServer {
         &self,
         Parameters(args): Parameters<InputButtonArgs>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        if let Some(r) = self.block_on_edpro("mega_input_press") { return Ok(r); }
+        if self.is_edpro() {
+            let lock = self.edpro_target();
+            let mut t = lock.lock().await;
+            return Ok(match t.input_press().await {
+                Ok(()) => ok_json(serde_json::json!({"ok": true})),
+                Err(e) => classify_edpro_err("mega_input_press", &e),
+            });
+        }
         let port = args.port.unwrap_or(0);
         let Some(b) = Button::parse(&args.button) else {
             return Ok(err_text(format!("unknown button: {:?}", args.button)));
@@ -646,7 +901,14 @@ impl MdsServer {
         &self,
         Parameters(args): Parameters<InputButtonArgs>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        if let Some(r) = self.block_on_edpro("mega_input_release") { return Ok(r); }
+        if self.is_edpro() {
+            let lock = self.edpro_target();
+            let mut t = lock.lock().await;
+            return Ok(match t.input_release().await {
+                Ok(()) => ok_json(serde_json::json!({"ok": true})),
+                Err(e) => classify_edpro_err("mega_input_release", &e),
+            });
+        }
         let port = args.port.unwrap_or(0);
         let Some(b) = Button::parse(&args.button) else {
             return Ok(err_text(format!("unknown button: {:?}", args.button)));
@@ -660,7 +922,14 @@ impl MdsServer {
         &self,
         Parameters(args): Parameters<InputGetStateArgs>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        if let Some(r) = self.block_on_edpro("mega_input_get_state") { return Ok(r); }
+        if self.is_edpro() {
+            let lock = self.edpro_target();
+            let mut t = lock.lock().await;
+            return Ok(match t.input_get_state().await {
+                Ok(()) => ok_json(serde_json::json!({"ok": true})),
+                Err(e) => classify_edpro_err("mega_input_get_state", &e),
+            });
+        }
         let port = args.port.unwrap_or(0);
         let map: serde_json::Map<String, serde_json::Value> = self
             .actor()

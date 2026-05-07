@@ -17,10 +17,12 @@ use rmcp::{
     service::{NotificationContext, RequestContext},
     tool_handler, ErrorData as McpError, RoleServer, ServerHandler,
 };
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::emulator::EmulatorActor;
 use crate::notifications::{Notifier, SnapshotCache};
 use crate::resources;
+use crate::target::edpro::EdProTarget;
 use crate::target::{EdProConfig, TargetKind};
 
 pub struct MdsServer {
@@ -31,6 +33,11 @@ pub struct MdsServer {
     snapshot_cache: SnapshotCache,
     target_kind: TargetKind,
     edpro_cfg: EdProConfig,
+    /// Hardware target. Always present so the dispatcher can route to it
+    /// uniformly; the inner state is `disconnected` until `connect` lands
+    /// (M5.7). `EdProTarget` methods are async + `&mut self`, hence the
+    /// `tokio` mutex behind an `Arc` so cloned servers share state.
+    edpro: Arc<AsyncMutex<EdProTarget>>,
 }
 
 impl MdsServer {
@@ -41,6 +48,7 @@ impl MdsServer {
         edpro_cfg: EdProConfig,
     ) -> Self {
         let snapshot_cache = notifier.cache();
+        let edpro = Arc::new(AsyncMutex::new(EdProTarget::new(edpro_cfg.clone())));
         Self {
             actor,
             tool_router: Self::tool_router(),
@@ -49,6 +57,7 @@ impl MdsServer {
             snapshot_cache,
             target_kind,
             edpro_cfg,
+            edpro,
         }
     }
 
@@ -60,8 +69,19 @@ impl MdsServer {
         self.target_kind
     }
 
+    /// M5.6: callers now read EdPro config indirectly via
+    /// `edpro_target().get_status()` — kept public for future use.
+    #[allow(dead_code)]
     pub fn edpro_cfg(&self) -> &EdProConfig {
         &self.edpro_cfg
+    }
+
+    /// Lock the EdPro target for an async call. Held only as long as the
+    /// dispatcher needs to forward one tool call; cheap because we never
+    /// contend with a long-running task today (M5.6: handshake + per-tool
+    /// USB round-trip is sub-ms over MockUsb, ~ms on real hardware).
+    pub fn edpro_target(&self) -> Arc<AsyncMutex<EdProTarget>> {
+        self.edpro.clone()
     }
 }
 
@@ -75,6 +95,7 @@ impl Clone for MdsServer {
             snapshot_cache: self.snapshot_cache.clone(),
             target_kind: self.target_kind,
             edpro_cfg: self.edpro_cfg.clone(),
+            edpro: self.edpro.clone(),
         }
     }
 }
