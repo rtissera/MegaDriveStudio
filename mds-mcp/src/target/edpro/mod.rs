@@ -27,7 +27,11 @@
 
 pub mod framing;
 pub mod proto;
+pub mod rsp;
 pub mod usb;
+
+#[allow(unused_imports)] // re-exported for M5.3 callers
+pub use rsp::{decode_packet, encode_packet, AckByte, RspError, StopReply};
 
 use crate::target::{EdProConfig, TargetKind, NOT_SUPPORTED};
 use usb::UsbTransport;
