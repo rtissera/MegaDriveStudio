@@ -71,6 +71,72 @@ static uint32_t g_init_cookie;
 #define MDS_EXC_TRAP1  33
 
 // ----------------------------------------------------------------------------
+// VDP MMIO ports (M5.7).
+// ----------------------------------------------------------------------------
+//
+// CRAM/VSRAM/VRAM are not directly memory-mapped on the 68k bus: the only
+// access path is to write a 32-bit "address-set" command to the VDP control
+// port at $C00004, then read words from the data port at $C00000 (each read
+// auto-advances the internal VDP address counter).
+//
+// Address-set encoding (per Plutiedev "VDP Ports" / SGDK `vdp.c`):
+//   cmd = ((A & 0x3FFF) << 16) | ((A >> 14) & 0x03) | CD;
+// where CD = 0x00 for VRAM_READ, 0x20 for CRAM_READ, 0x10 for VSRAM_READ.
+// We write the longword to $C00004 then loop word-reads from $C00000.
+//
+// VDP registers $00..$17 are WRITE-ONLY on hardware: there is no readback
+// path. Hosts that need reg state must either keep a shadow themselves or
+// rely on side-channel inference (e.g. user ROM exposing a known mailbox).
+// The stub does NOT attempt to fake "read VDP regs" — see qMdsVdpStatus
+// for what we *can* return: the VDP status word at $C00004 (read).
+#define VDP_DATA_PORT  0x00C00000u
+#define VDP_CTRL_PORT  0x00C00004u
+
+#define VDP_CD_VRAM_READ   0x00000000u
+#define VDP_CD_CRAM_READ   0x00000020u
+#define VDP_CD_VSRAM_READ  0x00000010u
+
+// CRAM = 64 words = 128 bytes. VSRAM = 40 words = 80 bytes.
+#define CRAM_BYTES   128u
+#define VSRAM_BYTES   80u
+
+// Hard cap on a single qMdsVram response. Larger requests are silently
+// truncated to this many bytes (host can chunk further). Cap is well under
+// our 190-byte PacketSize advertisement: 128 raw bytes -> 256 hex chars +
+// 4 framing bytes = 260; but our outbound encode buffer in send_packet is
+// bounded at RSP_BUF_MAX (190). We sidestep that by allocating a
+// dedicated stack buffer in the qMdsVram handler (see send_hex_packet_big).
+#define VRAM_CHUNK_MAX  128u
+
+// Encode address-set command for a 14-bit VRAM addr / 7-bit CRAM / 6-bit VSRAM.
+static uint32_t vdp_addr_cmd(uint16_t addr, uint32_t code) {
+    return ((uint32_t)(addr & 0x3FFF) << 16) | (((uint32_t)addr >> 14) & 0x03u) | code;
+}
+
+static void vdp_set_addr(uint32_t cmd) {
+    *(volatile uint32_t *)VDP_CTRL_PORT = cmd;
+}
+
+static uint16_t vdp_read_word(void) {
+    return *(volatile uint16_t *)VDP_DATA_PORT;
+}
+
+static uint16_t vdp_read_status(void) {
+    return *(volatile uint16_t *)VDP_CTRL_PORT;
+}
+
+// Read `nwords` words from VDP data port into `out` (big-endian byte order
+// preserved — the 68k stores u16 high-byte-first, matching what the host's
+// `parse_hex_bytes` expects to round-trip into the wire stream).
+static void vdp_read_block(uint8_t *out, uint16_t nwords) {
+    for (uint16_t i = 0; i < nwords; ++i) {
+        uint16_t w = vdp_read_word();
+        out[i * 2 + 0] = (uint8_t)(w >> 8);
+        out[i * 2 + 1] = (uint8_t)(w & 0xFF);
+    }
+}
+
+// ----------------------------------------------------------------------------
 // Hex helpers (inlined-by-gcc-because-tiny).
 // ----------------------------------------------------------------------------
 static const char k_hex[16] = "0123456789abcdef";
@@ -198,6 +264,30 @@ static void send_packet(const uint8_t *payload, size_t n) {
     usb_send_buf(out, pos);
 }
 
+// M5.7: emit a framed `$<hex>#xx` packet whose payload is the hex
+// representation of `nbytes` bytes from `src`. Skips escape (hex digits
+// never collide with # $ } *). Buffer lives on the supervisor stack —
+// kilobytes free below $FFFFFE.
+//
+// Worst case (qMdsVram): 128 raw bytes -> 256 hex chars + 4 framing = 260 B.
+static void send_hex_framed(const uint8_t *src, size_t nbytes) {
+    uint8_t out[VRAM_CHUNK_MAX * 2 + 4];
+    if (nbytes * 2 + 4 > sizeof(out)) return;
+    size_t pos = 0;
+    out[pos++] = '$';
+    uint8_t csum = 0;
+    for (size_t i = 0; i < nbytes; ++i) {
+        uint8_t hi = (uint8_t)k_hex[(src[i] >> 4) & 0xF];
+        uint8_t lo = (uint8_t)k_hex[src[i] & 0xF];
+        out[pos++] = hi; csum ^= hi;
+        out[pos++] = lo; csum ^= lo;
+    }
+    out[pos++] = '#';
+    out[pos++] = (uint8_t)k_hex[(csum >> 4) & 0xF];
+    out[pos++] = (uint8_t)k_hex[csum & 0xF];
+    usb_send_buf(out, pos);
+}
+
 static void send_ok(void) {
     static const uint8_t ok[2] = { 'O', 'K' };
     send_packet(ok, 2);
@@ -315,6 +405,55 @@ static int payload_starts(const uint8_t *p, size_t n, const char *s) {
     return 1;
 }
 
+// qMdsCram → 128 raw bytes (CRAM, 64 words at addr 0).
+static void handle_qmds_cram(void) {
+    uint8_t buf[CRAM_BYTES];
+    vdp_set_addr(vdp_addr_cmd(0, VDP_CD_CRAM_READ));
+    vdp_read_block(buf, CRAM_BYTES / 2);
+    send_hex_framed(buf, CRAM_BYTES);
+}
+
+// qMdsVsram → 80 raw bytes (VSRAM, 40 words at addr 0).
+static void handle_qmds_vsram(void) {
+    uint8_t buf[VSRAM_BYTES];
+    vdp_set_addr(vdp_addr_cmd(0, VDP_CD_VSRAM_READ));
+    vdp_read_block(buf, VSRAM_BYTES / 2);
+    send_hex_framed(buf, VSRAM_BYTES);
+}
+
+// qMdsVdpStatus → 4 hex digits (one word from $C00004 read = VDP status).
+static void handle_qmds_vdp_status(void) {
+    uint16_t s = vdp_read_status();
+    uint8_t buf[4];
+    size_t pos = 0;
+    emit_hex_byte(buf, &pos, (uint8_t)(s >> 8));
+    emit_hex_byte(buf, &pos, (uint8_t)(s & 0xFF));
+    send_packet(buf, pos);
+}
+
+// qMdsVram:HEX_ADDR,HEX_LEN → up to VRAM_CHUNK_MAX bytes from VRAM.
+// Larger requests are truncated (no error). Odd `len` is rounded up to
+// the next even byte (VDP reads are word-granular).
+static void handle_qmds_vram(const uint8_t *p, size_t n) {
+    // p starts at the ':' separator (caller advanced past "qMdsVram").
+    size_t pos = 0;
+    if (pos >= n || p[pos] != ':') { send_error(1); return; }
+    pos++;
+    uint32_t addr, len;
+    if (parse_hex_u32(p, n, &pos, ',', &addr) < 0)  { send_error(1); return; }
+    if (pos >= n || p[pos] != ',')                   { send_error(1); return; }
+    pos++;
+    if (parse_hex_u32(p, n, &pos, 0, &len) < 0)      { send_error(1); return; }
+    // Truncate (rather than error) on oversize — host can chunk further.
+    if (len > VRAM_CHUNK_MAX) len = VRAM_CHUNK_MAX;
+    // Round up to even (word-aligned).
+    uint32_t nwords = (len + 1u) >> 1;
+    uint8_t buf[VRAM_CHUNK_MAX];
+    vdp_set_addr(vdp_addr_cmd((uint16_t)(addr & 0xFFFF), VDP_CD_VRAM_READ));
+    vdp_read_block(buf, (uint16_t)nwords);
+    send_hex_framed(buf, (size_t)(nwords * 2));
+}
+
 static void handle_q(const uint8_t *p, size_t n) {
     if (payload_starts(p, n, "qSupported")) {
         const char *r = "PacketSize=190;swbreak+;qXfer:features:read-";
@@ -324,6 +463,17 @@ static void handle_q(const uint8_t *p, size_t n) {
     }
     if (payload_eq(p, n, "qAttached")) {
         send_packet((const uint8_t *)"1", 1);
+        return;
+    }
+    // M5.7 custom VDP queries. Naming convention: "qMds<Name>" with
+    // optional ":args". Hex-encoded bodies use `parse_hex_bytes`-compatible
+    // lowercase pairs (matches host's existing decoder).
+    if (payload_eq(p, n, "qMdsCram"))      { handle_qmds_cram();      return; }
+    if (payload_eq(p, n, "qMdsVsram"))     { handle_qmds_vsram();     return; }
+    if (payload_eq(p, n, "qMdsVdpStatus")) { handle_qmds_vdp_status(); return; }
+    if (payload_starts(p, n, "qMdsVram")) {
+        // Skip "qMdsVram" (8 bytes) and pass the rest (starts with ':').
+        handle_qmds_vram(p + 8, n - 8);
         return;
     }
     send_empty();

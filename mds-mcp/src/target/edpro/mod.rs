@@ -17,10 +17,12 @@
 //! - `resume` / `continue_run` → RSP `c` (fire-and-forget; no stop wait)
 //! - `get_68k_registers` → RSP `g`, decoded big-endian into 18 longs
 //! - `get_vdp_registers` → `m C00004,18` (raw 24 bytes; VDP shadow regs)
+//! - `get_palettes` → RSP `qMdsCram` monitor cmd (M5.7) → 128 raw CRAM bytes
+//! - `dump_tile` → RSP `qMdsVram:<index*32>,20` monitor cmd (M5.7) → 32 bytes
 //! - `pause` / `screenshot` / `save_state` / `load_state` /
-//!   `step_frame` / `get_z80_registers` / `get_palettes` / `get_sprites` /
-//!   `dump_tile` / `load_rom` / `unload_rom` / `mega_input_*` →
-//!   `not_supported_on_target` (see TODOs M5.6/M5.7).
+//!   `step_frame` / `get_z80_registers` / `get_sprites` /
+//!   `load_rom` / `unload_rom` / `mega_input_*` →
+//!   `not_supported_on_target` (see TODOs M5.6/M5.8).
 
 // Tool surface methods on `EdProTarget` aren't wired into `tools/mod.rs`
 // yet (the dispatcher still short-circuits via `block_on_edpro`). M5.6+
@@ -338,23 +340,47 @@ impl EdProTarget {
             .map_err(|e| anyhow::anyhow!("get_vdp_registers failed: {e}"))
     }
 
-    /// `mega_get_palettes` — CRAM is reachable only through the VDP data
-    /// port indirection, so a plain `m` won't suffice. M5.7 will add a
-    /// stub-side helper that auto-handles VDP indirection.
+    /// `mega_get_palettes` — read all 128 bytes of CRAM via the stub's
+    /// `qMdsCram` monitor command (VDP address-set + 64 word-reads from
+    /// the data port). The 9-bit BGR-per-entry decode (CRAM word ->
+    /// 24-bit RGB) is the caller's job; we surface raw bytes here so the
+    /// tool layer can choose its preferred encoding.
     pub async fn get_palettes(&mut self) -> anyhow::Result<Vec<u8>> {
-        anyhow::bail!("{NOT_SUPPORTED}: CRAM read needs stub VDP helper (TODO M5.7)");
+        let s = self.sync_mut()?;
+        let cram = s
+            .read_cram()
+            .await
+            .map_err(|e| anyhow::anyhow!("read_cram failed: {e}"))?;
+        Ok(cram.to_vec())
     }
 
-    /// `mega_get_sprites` — VRAM read via VDP data port. Same constraint
-    /// as `get_palettes`: needs the M5.7 stub helper.
+    /// `mega_get_sprites` — needs the VDP "Sprite Attribute Table" base
+    /// address, which lives in VDP register 5. Those registers are
+    /// **write-only** on hardware (no readback path), so we cannot derive
+    /// the SAT base from the stub alone.
+    ///
+    /// TODO M5.8: maintain a host-side VDP register shadow (populated at
+    /// `connect()` time from a known SGDK init or from a user-ROM mailbox
+    /// at a fixed work-RAM address) and use it here to issue
+    /// `read_vram(sat_base, sat_len)`. Until then, this surfaces an
+    /// explicit error so the IDE can render a hint instead of silently
+    /// returning bogus bytes.
     pub async fn get_sprites(&mut self) -> anyhow::Result<Vec<u8>> {
-        anyhow::bail!("{NOT_SUPPORTED}: VRAM read needs stub VDP helper (TODO M5.7)");
+        anyhow::bail!(
+            "{NOT_SUPPORTED}: sprite-attr-table address unknown on hw target until VDP REG_05 shadow is reachable (TODO M5.8)"
+        );
     }
 
-    /// `mega_dump_tile` — VRAM read at tile-index×32. Blocked on M5.7
-    /// stub helper.
-    pub async fn dump_tile(&mut self, _index: u32) -> anyhow::Result<Vec<u8>> {
-        anyhow::bail!("{NOT_SUPPORTED}: tile dump needs stub VRAM helper (TODO M5.7)");
+    /// `mega_dump_tile` — read 32 bytes (one 4bpp 8x8 tile) from VRAM at
+    /// `index * 32`. Routed through the stub's `qMdsVram` monitor command
+    /// which performs the VDP address-set + 16 word-reads.
+    pub async fn dump_tile(&mut self, index: u32) -> anyhow::Result<Vec<u8>> {
+        let s = self.sync_mut()?;
+        // VRAM addresses wrap at 64 KiB; allow any 16-bit-aligned tile index.
+        let addr = index.wrapping_mul(32);
+        s.read_vram(addr, 32)
+            .await
+            .map_err(|e| anyhow::anyhow!("dump_tile failed: {e}"))
     }
 
     /// `mega_get_68k_registers` — RSP `g`, decoded as 17/18 big-endian
@@ -397,10 +423,16 @@ impl EdProTarget {
             .unwrap_or_default()
     }
 
-    /// `mega_screenshot` — needs VRAM/CRAM helpers + tile decode. Blocked
-    /// on M5.7.
+    /// `mega_screenshot` — synthesising a frame on hardware requires
+    /// reading CRAM (palettes, M5.7 ✓), VRAM tile data (M5.7 ✓), and the
+    /// VDP register state (plane A/B base, scroll, sprite-table base,
+    /// window split, display mode). VDP regs `$00..$17` are
+    /// **write-only** on hardware — there's no MMIO read path. M5.8 will
+    /// populate a host-side reg shadow before this can flip on.
     pub async fn screenshot(&mut self) -> anyhow::Result<Vec<u8>> {
-        anyhow::bail!("{NOT_SUPPORTED}: screenshot needs stub VRAM/CRAM helpers (TODO M5.7)");
+        anyhow::bail!(
+            "{NOT_SUPPORTED}: screenshot needs VDP reg shadow for plane A/B addrs + scroll regs; deferred to M5.8"
+        );
     }
 
     /// `mega_save_state` — would need full 68k + VRAM dump. Out of scope.
@@ -694,13 +726,15 @@ mod tests {
         let mut t = EdProTarget::new(EdProConfig::default());
         let (m, _log) = make_mock(vec![]);
         t.connect_mock(m).await.unwrap();
+        // M5.7 wired `get_palettes` + `dump_tile` to qMds* monitor cmds —
+        // those are tested in their own dedicated tests below.
+        // `get_sprites` + `screenshot` remain NOT_SUPPORTED until M5.8 lands
+        // the VDP register shadow.
         for e in [
             t.load_rom(std::path::Path::new("/tmp/x")).await.unwrap_err().to_string(),
             t.unload_rom().await.unwrap_err().to_string(),
             t.step_frame(1).await.unwrap_err().to_string(),
-            t.get_palettes().await.unwrap_err().to_string(),
             t.get_sprites().await.unwrap_err().to_string(),
-            t.dump_tile(0).await.unwrap_err().to_string(),
             t.get_z80_registers().await.unwrap_err().to_string(),
             t.screenshot().await.unwrap_err().to_string(),
             t.save_state(0).await.unwrap_err().to_string(),
@@ -712,6 +746,78 @@ mod tests {
         ] {
             assert!(e.contains(NOT_SUPPORTED), "expected NOT_SUPPORTED, got: {e}");
         }
+    }
+
+    // --- M5.7 wired tools -------------------------------------------------
+
+    #[tokio::test]
+    async fn get_palettes_returns_128_cram_bytes() {
+        let raw: Vec<u8> = (0..128).map(|i| i as u8).collect();
+        let hex_pl: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+        let mut t = EdProTarget::new(EdProConfig::default());
+        let (m, log) = make_mock(vec![rep(hex_pl.as_bytes(), false)]);
+        t.connect_mock(m).await.unwrap();
+        let pal = t.get_palettes().await.unwrap();
+        assert_eq!(pal.len(), 128);
+        assert_eq!(pal[0], 0);
+        assert_eq!(pal[127], 127);
+        // qMdsCram packet appears on the wire.
+        let needle = rsp::encode_packet(b"qMdsCram");
+        assert!(tx_contains(&log, &needle), "qMdsCram missing from tx log");
+    }
+
+    #[tokio::test]
+    async fn dump_tile_reads_32_bytes_at_index_times_32() {
+        let raw: Vec<u8> = (0..32).map(|i| 0xA0 ^ i as u8).collect();
+        let hex_pl: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+        let mut t = EdProTarget::new(EdProConfig::default());
+        let (m, log) = make_mock(vec![rep(hex_pl.as_bytes(), false)]);
+        t.connect_mock(m).await.unwrap();
+        // tile index 0x10 -> VRAM addr 0x200, len 0x20.
+        let tile = t.dump_tile(0x10).await.unwrap();
+        assert_eq!(tile, raw);
+        let needle = rsp::encode_packet(b"qMdsVram:200,20");
+        assert!(tx_contains(&log, &needle), "qMdsVram packet missing");
+    }
+
+    #[tokio::test]
+    async fn get_palettes_propagates_disconnected() {
+        let mut t = EdProTarget::new(EdProConfig::default());
+        let e = t.get_palettes().await.unwrap_err().to_string();
+        assert!(
+            e.contains(NOT_SUPPORTED) && e.contains("not connected"),
+            "expected not-connected error, got: {e}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dump_tile_propagates_disconnected() {
+        let mut t = EdProTarget::new(EdProConfig::default());
+        let e = t.dump_tile(0).await.unwrap_err().to_string();
+        assert!(
+            e.contains(NOT_SUPPORTED) && e.contains("not connected"),
+            "expected not-connected error, got: {e}"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_sprites_blocked_on_m58_with_explicit_msg() {
+        let mut t = EdProTarget::new(EdProConfig::default());
+        let (m, _log) = make_mock(vec![]);
+        t.connect_mock(m).await.unwrap();
+        let e = t.get_sprites().await.unwrap_err().to_string();
+        assert!(e.contains(NOT_SUPPORTED));
+        assert!(e.contains("REG_05") || e.contains("M5.8"), "msg should reference REG_05/M5.8: {e}");
+    }
+
+    #[tokio::test]
+    async fn screenshot_blocked_on_m58_with_explicit_msg() {
+        let mut t = EdProTarget::new(EdProConfig::default());
+        let (m, _log) = make_mock(vec![]);
+        t.connect_mock(m).await.unwrap();
+        let e = t.screenshot().await.unwrap_err().to_string();
+        assert!(e.contains(NOT_SUPPORTED));
+        assert!(e.contains("M5.8"), "msg should reference M5.8: {e}");
     }
 
     // --- disconnected --------------------------------------------------
@@ -731,6 +837,8 @@ mod tests {
             t.continue_run().await.unwrap_err().to_string(),
             t.get_68k_registers().await.unwrap_err().to_string(),
             t.get_vdp_registers().await.unwrap_err().to_string(),
+            t.get_palettes().await.unwrap_err().to_string(),
+            t.dump_tile(0).await.unwrap_err().to_string(),
         ] {
             assert!(
                 e.contains(NOT_SUPPORTED) && e.contains("not connected"),

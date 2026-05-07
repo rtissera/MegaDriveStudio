@@ -21,12 +21,17 @@ use std::io;
 
 use super::proto;
 use super::rsp::{
-    self, cmd_continue, cmd_query_halt_reason, cmd_query_start_no_ack_mode, cmd_query_supported,
-    cmd_read_memory, cmd_read_registers, cmd_step, cmd_write_memory, cmd_write_registers,
-    decode_packet, encode_packet, parse_hex_bytes, parse_ok, parse_qsupported_reply,
-    parse_stop_reply, RspError, StopReply,
+    self, cmd_continue, cmd_qmds_cram, cmd_qmds_vdp_status, cmd_qmds_vram, cmd_qmds_vsram,
+    cmd_query_halt_reason, cmd_query_start_no_ack_mode, cmd_query_supported, cmd_read_memory,
+    cmd_read_registers, cmd_step, cmd_write_memory, cmd_write_registers, decode_packet,
+    encode_packet, parse_hex_bytes, parse_ok, parse_qsupported_reply, parse_stop_reply, RspError,
+    StopReply,
 };
 use super::usb::UsbTransport;
+
+/// Maximum bytes per qMdsVram request — must match `VRAM_CHUNK_MAX` in
+/// `mds-stub-68k/src/stub.c`. Larger reads must be chunked by the caller.
+pub const VRAM_CHUNK_MAX: u32 = 128;
 
 /// TRAP #1 opcode (big-endian) — patched into PSRAM at active breakpoints.
 const TRAP1_OPCODE: [u8; 2] = [0x4E, 0x41];
@@ -294,6 +299,58 @@ impl<T: UsbTransport> StubSync<T> {
         self.write_memory(addr, &saved).await?;
         // Intentionally do NOT remove from the table — see doc comment.
         Ok(())
+    }
+
+    // -----------------------------------------------------------------
+    // M5.7: VDP-indirect reads (qMds* monitor commands).
+    // -----------------------------------------------------------------
+    //
+    // These wrap the stub's custom `qMdsCram` / `qMdsVsram` /
+    // `qMdsVdpStatus` / `qMdsVram` packets. Stub-side helpers do the
+    // address-set + data-port read loop; host parses hex-encoded payloads.
+    //
+    // VDP state references: see `docs/02-m5-architecture.md` §5.7.
+
+    /// Read all 128 bytes of CRAM (64 9-bit BGR colour entries).
+    pub async fn read_cram(&mut self) -> Result<[u8; 128]> {
+        let reply = self.send_rsp_packet(&cmd_qmds_cram()).await?;
+        let bytes = decode_hex_payload(&reply)?;
+        if bytes.len() != 128 {
+            return Err(StubSyncError::UnexpectedReply(bytes));
+        }
+        let mut out = [0u8; 128];
+        out.copy_from_slice(&bytes);
+        Ok(out)
+    }
+
+    /// Read all 80 bytes of VSRAM (40 vertical-scroll word entries).
+    pub async fn read_vsram(&mut self) -> Result<[u8; 80]> {
+        let reply = self.send_rsp_packet(&cmd_qmds_vsram()).await?;
+        let bytes = decode_hex_payload(&reply)?;
+        if bytes.len() != 80 {
+            return Err(StubSyncError::UnexpectedReply(bytes));
+        }
+        let mut out = [0u8; 80];
+        out.copy_from_slice(&bytes);
+        Ok(out)
+    }
+
+    /// Read the VDP status word from `$C00004` (one word, 4 hex digits).
+    pub async fn read_vdp_status(&mut self) -> Result<u16> {
+        let reply = self.send_rsp_packet(&cmd_qmds_vdp_status()).await?;
+        let bytes = decode_hex_payload(&reply)?;
+        if bytes.len() != 2 {
+            return Err(StubSyncError::UnexpectedReply(bytes));
+        }
+        Ok(u16::from_be_bytes([bytes[0], bytes[1]]))
+    }
+
+    /// Read up to [`VRAM_CHUNK_MAX`] bytes of VRAM at `addr`. Caller is
+    /// responsible for chunking larger reads. Stub silently truncates
+    /// `len > VRAM_CHUNK_MAX` and word-aligns odd `len` upward.
+    pub async fn read_vram(&mut self, addr: u32, len: u32) -> Result<Vec<u8>> {
+        let reply = self.send_rsp_packet(&cmd_qmds_vram(addr, len)).await?;
+        decode_hex_payload(&reply)
     }
 
     // -----------------------------------------------------------------
@@ -684,6 +741,73 @@ mod tests {
         let needle = encode_packet(b"Gdeadbeef");
         let concat = s.transport().tx_log().to_vec();
         assert!(concat.windows(needle.len()).any(|w| w == needle));
+    }
+
+    // ---- M5.7 VDP reads --------------------------------------------------
+
+    /// Hex-encode a byte slice (lowercase) — local helper for canned-reply
+    /// payloads in the M5.7 tests below.
+    fn hex(bytes: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(bytes.len() * 2);
+        for &b in bytes {
+            out.extend_from_slice(format!("{b:02x}").as_bytes());
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn read_cram_decodes_128_bytes() {
+        let raw: Vec<u8> = (0..128).map(|i| i as u8).collect();
+        let mut s = mk(vec![rep(&hex(&raw), true)]);
+        let cram = s.read_cram().await.unwrap();
+        assert_eq!(&cram[..], &raw[..]);
+        // Confirm the wire payload is the qMdsCram packet.
+        let needle = encode_packet(b"qMdsCram");
+        assert!(s.transport().tx_log().windows(needle.len()).any(|w| w == needle));
+    }
+
+    #[tokio::test]
+    async fn read_cram_rejects_wrong_length() {
+        let mut s = mk(vec![rep(&hex(&[0u8; 64]), true)]);
+        assert!(matches!(
+            s.read_cram().await.unwrap_err(),
+            StubSyncError::UnexpectedReply(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn read_vsram_decodes_80_bytes() {
+        let raw: Vec<u8> = (0..80).map(|i| (i ^ 0xA5) as u8).collect();
+        let mut s = mk(vec![rep(&hex(&raw), true)]);
+        let vsram = s.read_vsram().await.unwrap();
+        assert_eq!(&vsram[..], &raw[..]);
+    }
+
+    #[tokio::test]
+    async fn read_vdp_status_parses_word_be() {
+        // VDP status = 0x3408 → 4 hex chars "3408"
+        let mut s = mk(vec![rep(b"3408", true)]);
+        assert_eq!(s.read_vdp_status().await.unwrap(), 0x3408);
+    }
+
+    #[tokio::test]
+    async fn read_vram_returns_arbitrary_chunk() {
+        // 32 bytes (one tile worth)
+        let raw: Vec<u8> = (0..32).map(|i| (0x10 + i) as u8).collect();
+        let mut s = mk(vec![rep(&hex(&raw), true)]);
+        let got = s.read_vram(0xC000, 32).await.unwrap();
+        assert_eq!(got, raw);
+        let needle = encode_packet(b"qMdsVram:c000,20");
+        assert!(s.transport().tx_log().windows(needle.len()).any(|w| w == needle));
+    }
+
+    #[tokio::test]
+    async fn read_vram_propagates_error_reply() {
+        let mut s = mk(vec![rep(b"E01", true)]);
+        assert!(matches!(
+            s.read_vram(0, 16).await.unwrap_err(),
+            StubSyncError::UnexpectedReply(_)
+        ));
     }
 
     // ---- Display impls ---------------------------------------------------

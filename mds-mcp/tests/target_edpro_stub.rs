@@ -44,14 +44,17 @@ async fn edpro_stub_surface() {
 
     // Tools whose `EdProTarget` method permanently returns
     // `not_supported_on_target` (these never need a live transport).
+    // M5.7: `mega_get_palettes` and `mega_dump_tile` flipped from
+    // permanently_unsupported to needs_connection (they now have real
+    // qMds* implementations behind `StubSync`). `mega_get_sprites` and
+    // `mega_screenshot` remain permanently NOT_SUPPORTED until M5.8
+    // surfaces a host-side VDP register shadow.
     let permanently_unsupported = [
         ("mega_load_rom", json!({"path": "/tmp/x.bin"})),
         ("mega_unload_rom", json!({})),
         ("mega_pause", json!({})),
         ("mega_step_frame", json!({})),
-        ("mega_get_palettes", json!({})),
         ("mega_get_sprites", json!({})),
-        ("mega_dump_tile", json!({"index":0})),
         ("mega_get_z80_registers", json!({})),
         ("mega_screenshot", json!({})),
         ("mega_save_state", json!({})),
@@ -85,6 +88,8 @@ async fn edpro_stub_surface() {
         ("mega_clear_breakpoint", json!({"id":256})),
         ("mega_get_68k_registers", json!({})),
         ("mega_get_vdp_registers", json!({})),
+        ("mega_get_palettes", json!({})),
+        ("mega_dump_tile", json!({"index":0})),
     ];
     for (i, (name, args)) in needs_connection.into_iter().enumerate() {
         let id = 200i64 + i as i64;

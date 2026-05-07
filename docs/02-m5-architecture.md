@@ -360,6 +360,45 @@ first entry. There is no `mds_stub_init()` — the host configures
 everything before allowing the CPU to execute its first user
 instruction.
 
+### 5.7 VDP MMIO access from the stub (M5.7)
+
+CRAM, VSRAM, and VRAM are not memory-mapped on the 68k bus: the only
+access path is to write a 32-bit "address-set" command to the VDP control
+port at `$C00004`, then loop word-reads from the data port at `$C00000`
+(each read auto-advances the VDP's internal address counter).
+
+Encoding (per Plutiedev "VDP Ports" + SGDK `~/mars/m68k-elf/src/vdp.c`):
+
+```
+cmd = ((A & 0x3FFF) << 16) | ((A >> 14) & 0x03) | CD
+```
+
+with `CD = 0x00` for VRAM_READ, `0x20` for CRAM_READ, `0x10` for
+VSRAM_READ. Stub helpers (`vdp_set_addr`, `vdp_read_word`) wrap this
+into a typed routine.
+
+VDP registers `$00..$17` are **write-only** on hardware — there is no
+MMIO read path. The stub does NOT attempt to fake reg readback. Tools
+that need register state (`get_sprites` SAT base, `screenshot` plane A/B
+addrs + scroll regs, etc.) are stubbed at NOT_SUPPORTED until M5.8 lands
+a host-side VDP shadow (populated at attach time).
+
+Custom monitor commands added in M5.7 (handled by the stub's `q`-packet
+dispatcher; reply payloads are hex-encoded raw bytes):
+
+| Packet                          | Reply                                | Wired tool         |
+|---------------------------------|--------------------------------------|--------------------|
+| `qMdsCram`                      | 256 hex chars (128 bytes of CRAM)    | `get_palettes`     |
+| `qMdsVsram`                     | 160 hex chars (80 bytes of VSRAM)    | (M5.8 reserve)     |
+| `qMdsVdpStatus`                 | 4 hex chars (status word at `$C00004` read) | (M5.8 reserve) |
+| `qMdsVram:<addr>,<len>`         | `2 * min(len, 128)` hex chars        | `dump_tile`        |
+
+`qMdsVram` silently truncates `len` above 128 bytes; the host side
+(`StubSync::read_vram`) and the const `VRAM_CHUNK_MAX` codify the cap so
+larger reads are chunked by the caller. All response buffers live on the
+supervisor stack inside the handler — no BSS impact (BSS stays at 268 B
+in the 512 B reserve).
+
 ---
 
 ## 6. Module layout
@@ -439,10 +478,10 @@ All 26 tools currently exposed by `mds-mcp/src/tools/mod.rs`. Column meanings:
 | `mega_get_68k_registers`      |  ✓  | `rsp` `g`                              | 18 longs                                |
 | `mega_get_z80_registers`      |  ✓  | `not_supported_on_target`              | stub doesn't pause Z80; future work     |
 | `mega_get_vdp_registers`      |  ✓  | `rsp` + stub helper reads `$C00004`    | shadow regs at `$FFFD00..` per SGDK     |
-| `mega_get_palettes`           |  ✓  | `rsp` `m` against CRAM via stub helper |                                         |
-| `mega_get_sprites`            |  ✓  | `rsp` `m` VRAM sprite table            | sprite list pointer from VDP reg 5      |
-| `mega_dump_tile`              |  ✓  | `rsp` `m` VRAM at tile-index × 32      |                                         |
-| `mega_screenshot`             |  ✓  | `not_supported_on_target`              | hardware can't snapshot framebuffer     |
+| `mega_get_palettes`           |  ✓  | `rsp` `qMdsCram` (M5.7)                | 128 raw CRAM bytes; 9-bit BGR decode on host |
+| `mega_get_sprites`            |  ✓  | blocked on VDP reg shadow (M5.8)       | needs SAT base from VDP REG_05 — write-only on hw |
+| `mega_dump_tile`              |  ✓  | `rsp` `qMdsVram:idx*32,20` (M5.7)      | 32 bytes / tile (4bpp 8x8)              |
+| `mega_screenshot`             |  ✓  | blocked on VDP reg shadow (M5.8)       | needs plane A/B addr + scroll regs (write-only on hw) |
 | `mega_save_state`             |  ✓  | `not_supported_on_target`              | hw has no savestate                     |
 | `mega_load_state`             |  ✓  | `not_supported_on_target`              |                                         |
 | `mega_input_set_state`        |  ✓  | `not_supported_on_target`              | physical pad only on hw                 |
@@ -450,10 +489,11 @@ All 26 tools currently exposed by `mds-mcp/src/tools/mod.rs`. Column meanings:
 | `mega_input_release`          |  ✓  | `not_supported_on_target`              |                                         |
 | `mega_input_get_state`        |  ✓  | `cmd` MEM_RD `$A10003` (`hw-only`)     | reads pad-1 port directly               |
 
-Counts: 14 tools mapped to RSP/cmd, 11 `not_supported_on_target`, 1 always
-available. The 11 non-supported tools return a structured
-`{ "error": "not_supported_on_target", "target": "edpro" }` response so the
-IDE can branch UI without parsing strings.
+Counts (post-M5.7): 16 tools mapped to RSP/cmd, 9 `not_supported_on_target`
+(2 of those — `get_sprites` and `screenshot` — flip on once the M5.8 VDP
+register shadow is reachable), 1 always available. The non-supported tools
+return a structured `{ "error": "not_supported_on_target", "target": "edpro" }`
+response so the IDE can branch UI without parsing strings.
 
 ---
 
@@ -481,6 +521,7 @@ hand to validate". Items 1–12 + 14–15 are testable against `MockUsb` only;
 | 14  | Pause-via-host: design IRQ7 trigger from MCU writes        | `mds-stub-68k/src/entry.s`, host `pause` impl              | 9          | yes (mechanism unknown — §10) |
 | 15  | Polled watchpoint (during T-bit step)                      | `mds-stub-68k/src/bp.c`, `stub_sync.rs`                    | 7, 8       | partial (perf tuning) |
 | 16  | Refactor `scripts/gdb-proxy.py` into mds-mcp tool surface  | `mds-mcp/src/target/edpro/proxy.rs` (new)                  | 5          | no  |
+| **M5.7 ✓** | **VDP/CRAM/VSRAM/VRAM helpers in stub + host RSP dispatch** | **`mds-stub-68k/src/stub.c` (qMds* handlers); `mds-mcp/src/target/edpro/{rsp,stub_sync,mod}.rs`** | **5, 9** | **no** |
 
 The CLAUDE.md `Notes Mega Everdrive Pro` section already references
 `scripts/gdb-proxy.py` and `scripts/stub/`; (16) folds the Python proxy into

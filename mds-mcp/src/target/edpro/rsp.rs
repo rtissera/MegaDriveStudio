@@ -388,6 +388,43 @@ pub fn cmd_query_start_no_ack_mode() -> Vec<u8> {
 }
 
 // ---------------------------------------------------------------------------
+// M5.7: custom VDP queries (handled by mds-stub-68k's `qMds*` dispatcher).
+//
+// These are *not* part of the GDB RSP standard — they're our private monitor
+// commands (the `qMds<Name>` namespace) for reading VDP-indirect memory
+// (CRAM/VSRAM/VRAM) and the VDP status word, which are not directly
+// memory-mapped on the 68k bus and so can't be served by a plain `m` packet.
+//
+// Reply format: hex-encoded raw bytes (CRAM/VSRAM/VRAM) or 4 hex digits
+// (VDP status). Both decoded by the host via `parse_hex_bytes`.
+// ---------------------------------------------------------------------------
+
+/// `qMdsCram` — read all 128 bytes of CRAM (64 9-bit BGR colour entries).
+pub fn cmd_qmds_cram() -> Vec<u8> {
+    b"qMdsCram".to_vec()
+}
+
+/// `qMdsVsram` — read all 80 bytes of VSRAM (40 vertical-scroll entries).
+pub fn cmd_qmds_vsram() -> Vec<u8> {
+    b"qMdsVsram".to_vec()
+}
+
+/// `qMdsVdpStatus` — read the VDP status word (4 hex digits, big-endian).
+pub fn cmd_qmds_vdp_status() -> Vec<u8> {
+    b"qMdsVdpStatus".to_vec()
+}
+
+/// `qMdsVram:<addr>,<len>` — read up to 128 bytes from VRAM at `addr`.
+/// Stub silently truncates `len` to 128; host caller chunks larger reads.
+pub fn cmd_qmds_vram(addr: u32, len: u32) -> Vec<u8> {
+    let mut out = Vec::from(b"qMdsVram:".as_slice());
+    push_hex_u32(&mut out, addr);
+    out.push(b',');
+    push_hex_u32(&mut out, len);
+    out
+}
+
+// ---------------------------------------------------------------------------
 // Reply parsers
 // ---------------------------------------------------------------------------
 
@@ -748,6 +785,38 @@ mod tests {
         assert_eq!(cmd_query_halt_reason(), b"?".to_vec());
         assert_eq!(cmd_vcont("c:1"), b"vCont;c:1".to_vec());
         assert_eq!(cmd_query_start_no_ack_mode(), b"QStartNoAckMode".to_vec());
+    }
+
+    // --- M5.7 qMds* VDP queries -------------------------------------------
+
+    #[test]
+    fn cmd_qmds_cram_payload() {
+        assert_eq!(cmd_qmds_cram(), b"qMdsCram".to_vec());
+    }
+
+    #[test]
+    fn cmd_qmds_vsram_payload() {
+        assert_eq!(cmd_qmds_vsram(), b"qMdsVsram".to_vec());
+    }
+
+    #[test]
+    fn cmd_qmds_vdp_status_payload() {
+        assert_eq!(cmd_qmds_vdp_status(), b"qMdsVdpStatus".to_vec());
+    }
+
+    #[test]
+    fn cmd_qmds_vram_payload() {
+        // Lowercase, no-leading-zeros hex (matches existing builders).
+        assert_eq!(cmd_qmds_vram(0, 32), b"qMdsVram:0,20".to_vec());
+        assert_eq!(cmd_qmds_vram(0xC000, 64), b"qMdsVram:c000,40".to_vec());
+        assert_eq!(cmd_qmds_vram(0x1234, 0x80), b"qMdsVram:1234,80".to_vec());
+    }
+
+    #[test]
+    fn cmd_qmds_vram_roundtrips_through_packet() {
+        let frame = encode_packet(&cmd_qmds_vram(0xC000, 0x40));
+        let (decoded, _) = decode_packet(&frame).unwrap();
+        assert_eq!(decoded, b"qMdsVram:c000,40");
     }
 
     // --- Reply parsers -----------------------------------------------------

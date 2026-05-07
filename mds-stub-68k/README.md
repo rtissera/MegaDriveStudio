@@ -153,6 +153,38 @@ before the next `c` or `s`.
 PacketSize advertised is 190 bytes. Wire format is byte-compatible with
 `mds-mcp/src/target/edpro/rsp.rs`.
 
+## Custom VDP queries (M5.7)
+
+CRAM, VSRAM, and VRAM are not memory-mapped on the 68k bus, so a plain
+`m addr,len` won't reach them. The stub adds four custom monitor
+commands under the `qMds<Name>` namespace. Reply payloads are
+hex-encoded raw bytes (`parse_hex_bytes`-compatible) except for
+`qMdsVdpStatus`, which is 4 raw hex digits.
+
+| Packet                  | Reply (raw bytes after host hex-decode)              | Notes                                       |
+|-------------------------|------------------------------------------------------|---------------------------------------------|
+| `qMdsCram`              | 128 bytes (64 9-bit BGR colour entries)              | always reads CRAM addr 0..63                |
+| `qMdsVsram`             | 80 bytes (40 vertical-scroll word entries)           | always reads VSRAM addr 0..39               |
+| `qMdsVdpStatus`         | 2 bytes (status word from `$C00004` read, big-endian) | vblank/hblank/sprite collision/dma busy    |
+| `qMdsVram:<a>,<l>`      | up to 128 bytes from VRAM addr `a`                   | `l > 128` is silently truncated; odd `l` rounded up |
+
+Implementation: each handler writes the 32-bit address-set command to
+`$C00004`, then loops word reads from `$C00000`. Encoding follows
+SGDK's `vdp.c` and Plutiedev's "VDP Ports" reference:
+
+```
+cmd = ((A & 0x3FFF) << 16) | ((A >> 14) & 0x03) | CD
+   CD = 0x00 (VRAM_READ) | 0x20 (CRAM_READ) | 0x10 (VSRAM_READ)
+```
+
+VDP registers `$00..$17` are **write-only on hardware** (no MMIO
+readback path), so the stub does not attempt to expose them — tools
+that need register state will pick them up from a host-side reg shadow
+in M5.8.
+
+Outbound buffers for these handlers live on the supervisor stack
+(kilobytes free below `$FFFFFE`); BSS is unchanged at 268 B.
+
 ## Footprint
 
 ```sh
@@ -163,15 +195,19 @@ Current build (with `-Os -m68000`):
 
 | Region        | Size                       |
 |---------------|----------------------------|
-| text + rodata | ~1.95 KB (in cart PSRAM)   |
+| text + rodata | ~2.7 KB (in cart PSRAM)    |
 | BSS           | 268 B used / 512 B reserved (in MD work RAM) |
-| **flat .bin** | **~1.95 KB** (text only — BSS not materialised) |
+| **flat .bin** | **~2.7 KB** (text only — BSS not materialised) |
 
-After the M5.4b "easy wins" shrink: BP table dropped (host-owned), RLE
-expansion dropped, escape encode dropped, single decoded-payload
-buffer in BSS, outbound encode buffer on supervisor stack. The
-in-binary BSS stayed the same on disk because BSS is a NOLOAD section
-now.
+History:
+- **M5.4b "easy wins" shrink:** BP table dropped (host-owned), RLE
+  expansion dropped, escape encode dropped, single decoded-payload
+  buffer in BSS, outbound encode buffer on supervisor stack. The
+  in-binary BSS stayed the same on disk because BSS is a NOLOAD
+  section. Footprint: text=1968 B / BSS=268 B.
+- **M5.7 VDP helpers:** added four `qMds*` handlers (CRAM/VSRAM/VDP
+  status / VRAM chunk) plus a stack-buffered `send_hex_framed`
+  variant for replies up to 256 hex chars. text=2740 B / BSS=268 B.
 
 ## Internals
 
