@@ -34,6 +34,7 @@ pub mod elf_parse;
 pub mod framing;
 pub mod proto;
 pub mod rsp;
+pub mod screenshot;
 pub mod serial;
 pub mod stub_blob;
 pub mod stub_sync;
@@ -634,16 +635,30 @@ impl EdProTarget {
             .unwrap_or_default()
     }
 
-    /// `mega_screenshot` — synthesising a frame on hardware requires
-    /// reading CRAM (palettes, M5.7 ✓), VRAM tile data (M5.7 ✓), and the
-    /// VDP register state (plane A/B base, scroll, sprite-table base,
-    /// window split, display mode). VDP regs `$00..$17` are
-    /// **write-only** on hardware — there's no MMIO read path. M5.8 will
-    /// populate a host-side reg shadow before this can flip on.
+    /// `mega_screenshot` — M5.8b: synthesise a frame on hardware by
+    /// reading every VDP shadow input (regValues + plane addrs from work
+    /// RAM, CRAM, VSRAM, VRAM) through the existing RSP commands and
+    /// running a host-side decoder. Returns PNG bytes (RGB8, 320×224 or
+    /// 256×224 depending on H40/H32).
+    ///
+    /// Pre-conditions:
+    /// - target connected (`sync_mut` runs first → `not_connected` if not).
+    /// - `--edpro-elf <path>` was supplied at startup AND parsing succeeded
+    ///   (M5.8a). Without symbols we have no way to find SGDK's plane
+    ///   address shadows; surfaces a clear error pointing the user at the
+    ///   `--edpro-elf` flag.
     pub async fn screenshot(&mut self) -> anyhow::Result<Vec<u8>> {
-        anyhow::bail!(
-            "{NOT_SUPPORTED}: screenshot needs VDP reg shadow for plane A/B addrs + scroll regs; deferred to M5.8"
-        );
+        // sync_mut() first so the disconnected case keeps producing the
+        // canonical `not_connected` error string.
+        let _ = self.sync_mut()?;
+        let sym = self.symbols.clone().ok_or_else(|| {
+            anyhow::anyhow!(
+                "{NOT_SUPPORTED}: screenshot needs --edpro-elf <path> + ROM built with debug; \
+                 M5.8a symbol parse not done at connect"
+            )
+        })?;
+        let s = self.sync_mut()?;
+        screenshot::render_frame(s, &sym).await
     }
 
     /// `mega_save_state` — would need full 68k + VRAM dump. Out of scope.
@@ -1107,7 +1122,9 @@ mod tests {
             t.step_frame(1).await.unwrap_err().to_string(),
             t.get_sprites().await.unwrap_err().to_string(),
             t.get_z80_registers().await.unwrap_err().to_string(),
-            t.screenshot().await.unwrap_err().to_string(),
+            // M5.8b: screenshot now needs ELF symbols; without them
+            // it surfaces NOT_SUPPORTED + the --edpro-elf hint. Tested
+            // separately in screenshot_without_symbols_errors_clearly.
             t.save_state(0).await.unwrap_err().to_string(),
             t.load_state(0).await.unwrap_err().to_string(),
             t.input_set_state().await.unwrap_err().to_string(),
@@ -1187,13 +1204,100 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn screenshot_blocked_on_m58_with_explicit_msg() {
+    async fn screenshot_without_symbols_errors_clearly() {
+        // Connected target, no --edpro-elf → screenshot must surface a
+        // hint about the flag. (M5.8b — replaces the M5.8 deferred bail.)
         let mut t = EdProTarget::new(EdProConfig::default());
         let (m, _log) = make_mock(vec![]);
         t.connect_mock(m).await.unwrap();
         let e = t.screenshot().await.unwrap_err().to_string();
-        assert!(e.contains(NOT_SUPPORTED));
-        assert!(e.contains("M5.8"), "msg should reference M5.8: {e}");
+        assert!(e.contains(NOT_SUPPORTED), "must include NOT_SUPPORTED tag: {e}");
+        assert!(
+            e.contains("--edpro-elf"),
+            "msg must hint at the elf-path fix, got: {e}"
+        );
+    }
+
+    #[tokio::test]
+    async fn screenshot_with_symbols_renders_known_frame() {
+        // Build a canned reply queue that drives render_frame end-to-end.
+        // Order on the wire (matches `render_frame`):
+        //   1. m <reg_values>,13          → 19 bytes regValues
+        //   2. m <bga_addr>,2             → bga (u16 BE)
+        //   3. m <bgb_addr>,2             → bgb
+        //   4. m <slist_addr>,2           → slist
+        //   5. m <window_addr>,2          → window (read but unused)
+        //   6. m <hscroll>,2              → hscroll
+        //   7. qMdsCram                   → 128 bytes
+        //   8. qMdsVsram                  → 80 bytes
+        //   9. qMdsVram (×512 chunks)     → 64 KiB
+        let to_hex = |bytes: &[u8]| -> String {
+            bytes.iter().map(|b| format!("{b:02x}")).collect()
+        };
+
+        // regValues: enable display + H40, backdrop = palette idx 1.
+        let mut regs = [0u8; 19];
+        regs[1] = 0x40;
+        regs[12] = 0x01;
+        regs[7] = 0x01;
+
+        // Plane addresses: bga at $C000, bgb at $E000, slist at $F800,
+        // window at $D000, hscroll at $FC00. Each is a u16 VRAM offset.
+        let bga: u16 = 0xC000;
+        let bgb: u16 = 0xE000;
+        let slist: u16 = 0xF800;
+        let window: u16 = 0xD000;
+        let hscroll: u16 = 0xFC00;
+
+        // CRAM: palette[1] = white-ish (R=7,G=7,B=7).
+        let mut cram = [0u8; 128];
+        cram[2] = 0x0E;
+        cram[3] = 0xEE;
+
+        let vsram = [0u8; 80];
+
+        // VRAM all zero — every plane cell decodes to tile 0, palette 0,
+        // and tile 0 is empty (transparent), so the entire frame becomes
+        // backdrop = palette[1] = white. Sprite list at $F800 starts with
+        // y=0 (off-screen), link=0 → no sprites drawn.
+        let vram = vec![0u8; 0x1_0000];
+
+        // Build replies.
+        let mut replies: Vec<Vec<u8>> = vec![
+            rep(to_hex(&regs).as_bytes(), false),
+            rep(to_hex(&bga.to_be_bytes()).as_bytes(), false),
+            rep(to_hex(&bgb.to_be_bytes()).as_bytes(), false),
+            rep(to_hex(&slist.to_be_bytes()).as_bytes(), false),
+            rep(to_hex(&window.to_be_bytes()).as_bytes(), false),
+            rep(to_hex(&hscroll.to_be_bytes()).as_bytes(), false),
+            rep(to_hex(&cram).as_bytes(), false),
+            rep(to_hex(&vsram).as_bytes(), false),
+        ];
+        // 64 KiB of VRAM in 128-byte chunks.
+        for chunk_idx in 0..512usize {
+            let start = chunk_idx * 128;
+            replies.push(rep(to_hex(&vram[start..start + 128]).as_bytes(), false));
+        }
+
+        let mut t = EdProTarget::new(EdProConfig::default());
+        let (m, _log) = make_mock(replies);
+        t.attach_with_elf(m, fixture_symbols()).await.unwrap();
+        let png = t.screenshot().await.unwrap();
+
+        // PNG decodes; dimensions match H40 (320×224).
+        let dec = png::Decoder::new(png.as_slice());
+        let reader = dec.read_info().unwrap();
+        let info = reader.info();
+        assert_eq!(info.width, 320);
+        assert_eq!(info.height, 224);
+        assert_eq!(info.color_type, png::ColorType::Rgb);
+
+        // First pixel must be the backdrop colour (white-ish from
+        // palette[1] = $0EEE → all components 255).
+        let mut reader = reader;
+        let mut frame = vec![0u8; reader.output_buffer_size()];
+        reader.next_frame(&mut frame).unwrap();
+        assert_eq!(&frame[0..3], &[255, 255, 255]);
     }
 
     // --- disconnected --------------------------------------------------
@@ -1215,6 +1319,7 @@ mod tests {
             t.get_vdp_registers().await.unwrap_err().to_string(),
             t.get_palettes().await.unwrap_err().to_string(),
             t.dump_tile(0).await.unwrap_err().to_string(),
+            t.screenshot().await.unwrap_err().to_string(),
         ] {
             assert!(
                 e.contains(NOT_SUPPORTED) && e.contains("not connected"),

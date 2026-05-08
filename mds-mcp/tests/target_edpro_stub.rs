@@ -50,13 +50,15 @@ async fn edpro_stub_surface() {
     // is now wired to the SGDK ELF-shadow path; against a *disconnected*
     // target it surfaces `not_connected` first (sync_mut runs before the
     // symbols check) so it's moved into `needs_connection` below.
-    // `mega_screenshot` remains permanently NOT_SUPPORTED until M5.8b.
+    // M5.8b: `mega_screenshot` is wired to the host-side VDP decoder;
+    // against a disconnected target it bails with `not_connected` (the
+    // sync_mut() check runs before the symbols check), so it joined
+    // `needs_connection` too.
     let permanently_unsupported = [
         ("mega_load_rom", json!({"path": "/tmp/x.bin"})),
         ("mega_unload_rom", json!({})),
         ("mega_step_frame", json!({})),
         ("mega_get_z80_registers", json!({})),
-        ("mega_screenshot", json!({})),
         ("mega_save_state", json!({})),
         ("mega_load_state", json!({})),
         ("mega_input_set_state", json!({})),
@@ -92,6 +94,7 @@ async fn edpro_stub_surface() {
         ("mega_get_palettes", json!({})),
         ("mega_dump_tile", json!({"index":0})),
         ("mega_get_sprites", json!({})),
+        ("mega_screenshot", json!({})),
     ];
     for (i, (name, args)) in needs_connection.into_iter().enumerate() {
         let id = 200i64 + i as i64;
