@@ -48,17 +48,22 @@ pub struct libra_config_t {
 ///
 /// Layout matches `parse_header` in `target::edpro::stub_blob`:
 /// MAGIC ('MDST'), entry_trace, entry_trap1, reserved=0, then 16 bytes
-/// of NOPs (`0x4E71` repeated). Both entry points are set to the load
-/// address itself — the placeholder will trigger an unimplemented-trap
-/// loop if anyone ever tries to actually run it on hardware, which is
-/// the desired loud failure mode.
+/// of NOPs (`0x4E71` repeated). Both entry points sit inside the
+/// placeholder body (header is 16 bytes, code starts at +16) so they
+/// land in NOPs rather than off the end of the blob — but they are
+/// deliberately distinct to mirror a real build, where the trace and
+/// trap1 handlers live at different offsets. Anyone actually running
+/// this on hardware will spin in NOPs forever, which is the desired
+/// loud failure mode.
 const PLACEHOLDER_LOAD_ADDR: u32 = 0x0030_0000;
+const PLACEHOLDER_ENTRY_TRACE: u32 = PLACEHOLDER_LOAD_ADDR + 0x10; // first NOP
+const PLACEHOLDER_ENTRY_TRAP1: u32 = PLACEHOLDER_LOAD_ADDR + 0x14; // third NOP
 
 fn write_placeholder_stub(out: &Path) -> std::io::Result<()> {
     let mut blob = Vec::with_capacity(32);
     blob.extend_from_slice(&0x4D44_5354u32.to_be_bytes()); // 'MDST'
-    blob.extend_from_slice(&PLACEHOLDER_LOAD_ADDR.to_be_bytes());
-    blob.extend_from_slice(&PLACEHOLDER_LOAD_ADDR.to_be_bytes());
+    blob.extend_from_slice(&PLACEHOLDER_ENTRY_TRACE.to_be_bytes());
+    blob.extend_from_slice(&PLACEHOLDER_ENTRY_TRAP1.to_be_bytes());
     blob.extend_from_slice(&0u32.to_be_bytes()); // reserved
     for _ in 0..8 {
         blob.extend_from_slice(&0x4E71u16.to_be_bytes()); // NOP
