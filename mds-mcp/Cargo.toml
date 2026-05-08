@@ -55,9 +55,20 @@ async-trait = "0.1"
 # Baud is irrelevant on the EdPro (USB-CDC ignores it) but we mirror
 # `ricky26/megalink-rs` (`serialport::new(path, 9600)`) for consistency.
 tokio-serial = "5.4"
+# ELF parser used to extract SGDK's work-RAM symbol addresses (M5.8a).
+# We only need the .symtab from a static-linked m68k ELF, so disable the
+# heavy default features (compression, wasm, mach-o, pe...) to keep the
+# dep tree small. `read_core` + `elf` give us `ElfFile32` and big-endian
+# parsing — m68k ROMs are always BE 32-bit.
+object = { version = "0.36", default-features = false, features = ["std", "read_core", "elf"] }
 
 [dev-dependencies]
 tokio = { version = "1.41", features = ["full", "process"] }
+# Re-pull `object` with its writer enabled so unit tests can synthesise
+# minimal m68k ELFs in memory (no on-disk fixtures, no marsdev dep) to
+# round-trip the .symtab parser. Production code only needs the reader,
+# kept above with default-features off.
+object = { version = "0.36", features = ["std", "read_core", "elf", "write_core", "write_std"] }
 
 [build-dependencies]
 bindgen = "0.72.1"

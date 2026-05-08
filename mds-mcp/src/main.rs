@@ -73,6 +73,15 @@ struct Cli {
     /// transports. Defaults to 9600.
     #[arg(long, value_name = "BAUD", default_value_t = target::EdProConfig::DEFAULT_BAUD)]
     edpro_baud: u32,
+
+    /// Path to a debug ELF (output of `make debug`) for the EdPro target.
+    /// Optional but required for `mega_get_vdp_registers` and
+    /// `mega_get_sprites` on hardware: the VDP register file is
+    /// write-only, so we recover plane / SAT / window addresses from
+    /// SGDK's software shadow globals (`regValues`, `slist_addr`, ...)
+    /// whose work-RAM addresses live in the ELF's `.symtab`. M5.8a.
+    #[arg(long, value_name = "PATH")]
+    edpro_elf: Option<PathBuf>,
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -92,6 +101,7 @@ async fn main() -> Result<()> {
     let edpro_cfg = EdProConfig {
         port: cli.edpro_port.clone(),
         baud: cli.edpro_baud,
+        elf_path: cli.edpro_elf.clone(),
         ..Default::default()
     };
 

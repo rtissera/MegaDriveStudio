@@ -30,6 +30,7 @@
 // otherwise-unused public methods so `clippy -D warnings` is clean.
 #![allow(dead_code)]
 
+pub mod elf_parse;
 pub mod framing;
 pub mod proto;
 pub mod rsp;
@@ -46,6 +47,7 @@ pub use rsp::{decode_packet, encode_packet, AckByte, RspError, StopReply};
 pub use stub_sync::{BreakpointTable, StubSync, StubSyncError};
 
 use crate::target::{EdProConfig, TargetKind, NOT_SUPPORTED};
+use elf_parse::SgdkSymbols;
 use usb::UsbTransport;
 
 /// VDP registers MMIO base — control port. The on-cart stub reads these
@@ -141,6 +143,12 @@ pub struct EdProTarget {
     /// whether it must run the unpause memory-ops dance before letting
     /// the CPU go.
     paused: Option<PausedState>,
+    /// M5.8a: SGDK VDP-shadow work-RAM addresses parsed from the debug
+    /// ELF at `connect()` time. `None` if no `cfg.elf_path` was supplied
+    /// or parse failed (parse failures only warn; per-tool methods
+    /// surface the canonical "ELF symbols not loaded" error). Cached
+    /// once at attach — symbols don't move at runtime.
+    symbols: Option<SgdkSymbols>,
 }
 
 /// Snapshot stashed by [`EdProTarget::pause`] for the resume path.
@@ -165,7 +173,16 @@ impl EdProTarget {
             entry_vbl: 0,
             blob_load_addr: stub_blob::STUB_LOAD_ADDR.0,
             paused: None,
+            symbols: None,
         }
+    }
+
+    /// Returns the cached SGDK symbol table (if `cfg.elf_path` was set
+    /// and parsing succeeded at `connect()` time). Surfaced so the tool
+    /// layer can render a "no symbols" hint when the user calls
+    /// VDP-shadow-dependent tools without `--edpro-elf`.
+    pub fn symbols(&self) -> Option<&SgdkSymbols> {
+        self.symbols.as_ref()
     }
 
     pub fn kind(&self) -> TargetKind {
@@ -276,6 +293,45 @@ impl EdProTarget {
         if let Ok(hdr) = stub_blob::parse_header(stub_blob::STUB_BLOB) {
             self.entry_vbl = hdr.entry_vbl;
         }
+        // M5.8a — if the user supplied --edpro-elf, parse SGDK's VDP
+        // shadow symbols now. Failure is non-fatal: tools that need
+        // those addresses surface a clear error per call rather than
+        // refusing the connection (the user may want to debug without
+        // VDP-state tools, e.g. just memory + breakpoints).
+        if let Some(path) = self.cfg.elf_path.clone() {
+            match elf_parse::parse_sgdk_symbols(&path) {
+                Ok(sym) => {
+                    tracing::info!(
+                        elf = %path.display(),
+                        reg_values = format!("{:#x}", sym.reg_values),
+                        slist_addr = format!("{:#x}", sym.slist_addr),
+                        "M5.8a: SGDK VDP shadow symbols loaded"
+                    );
+                    self.symbols = Some(sym);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        elf = %path.display(),
+                        error = %e,
+                        "M5.8a: SGDK symbol parse failed — get_vdp_registers / get_sprites will return an error until rebuilt with debug info"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Test helper: connect via `MockUsb` and inject a pre-baked
+    /// `SgdkSymbols` table directly. Skips ELF parsing entirely so unit
+    /// tests don't need to spit out a full m68k binary.
+    #[cfg(test)]
+    pub async fn attach_with_elf(
+        &mut self,
+        transport: Box<dyn UsbTransport + Send>,
+        symbols: SgdkSymbols,
+    ) -> anyhow::Result<()> {
+        self.connect_mock(transport).await?;
+        self.symbols = Some(symbols);
         Ok(())
     }
 
@@ -422,12 +478,31 @@ impl EdProTarget {
             .map_err(|e| anyhow::anyhow!("write_memory failed: {e}"))
     }
 
-    /// `mega_get_vdp_registers` — read 24 raw bytes from the VDP control
-    /// port. The on-cart stub services the `m` RSP packet via a 68k MMIO
-    /// read since it runs on the same bus. Tool layer (M5.6) decodes.
+    /// `mega_get_vdp_registers` — read SGDK's 19-byte software shadow
+    /// of VDP regs `$00..$12` (`regValues`) from MD work RAM via the
+    /// on-cart 68k debug stub.
+    ///
+    /// VDP register file is **write-only** in MMIO; the only way to
+    /// recover the live values is from SGDK's `regValues[19]` shadow,
+    /// whose work-RAM address is parsed out of the debug ELF at
+    /// `connect()` time (M5.8a — see `elf_parse`).
+    ///
+    /// Returns the raw 19 bytes; caller (tool layer) decodes the same
+    /// way as the emulator path. If `--edpro-elf` wasn't supplied, this
+    /// surfaces a clear "ELF symbols not loaded" error.
     pub async fn get_vdp_registers(&mut self) -> anyhow::Result<Vec<u8>> {
+        // sync_mut() first so the disconnected case keeps producing the
+        // canonical "not connected" error string the tool dispatcher
+        // routes to `reason: "not_connected"`.
+        let _ = self.sync_mut()?;
+        let reg_values = self.symbols.as_ref().map(|s| s.reg_values).ok_or_else(|| {
+            anyhow::anyhow!(
+                "{NOT_SUPPORTED}: VDP regs unavailable: ELF symbols not loaded — \
+                 pass --edpro-elf <path> at startup or rebuild ROM with debug + .symtab"
+            )
+        })?;
         let s = self.sync_mut()?;
-        s.read_memory(VDP_REGS_BASE, 24)
+        s.read_memory(reg_values, 19)
             .await
             .map_err(|e| anyhow::anyhow!("get_vdp_registers failed: {e}"))
     }
@@ -446,21 +521,65 @@ impl EdProTarget {
         Ok(cram.to_vec())
     }
 
-    /// `mega_get_sprites` — needs the VDP "Sprite Attribute Table" base
-    /// address, which lives in VDP register 5. Those registers are
-    /// **write-only** on hardware (no readback path), so we cannot derive
-    /// the SAT base from the stub alone.
+    /// `mega_get_sprites` — read the full 640-byte (80 × 8) Sprite
+    /// Attribute Table from VRAM.
     ///
-    /// TODO M5.8: maintain a host-side VDP register shadow (populated at
-    /// `connect()` time from a known SGDK init or from a user-ROM mailbox
-    /// at a fixed work-RAM address) and use it here to issue
-    /// `read_vram(sat_base, sat_len)`. Until then, this surfaces an
-    /// explicit error so the IDE can render a hint instead of silently
-    /// returning bogus bytes.
+    /// Step 1 — fetch SGDK's `slist_addr` (u16 VRAM offset) from work
+    /// RAM via the stub's `m` RSP packet. The address itself isn't
+    /// reachable through any VDP MMIO — VDP reg `$05` is write-only —
+    /// so we depend on the same M5.8a ELF-symbol path used by
+    /// `get_vdp_registers`.
+    ///
+    /// Step 2 — pull 640 bytes of VRAM at that offset via `qMdsVram`.
+    /// `StubSync::read_vram` chunks at `VRAM_CHUNK_MAX` (128 B), so we
+    /// issue 5 sequential reads back-to-back.
+    ///
+    /// Returns the raw bytes; the tool layer decodes the 8-byte sprite
+    /// descriptor format.
     pub async fn get_sprites(&mut self) -> anyhow::Result<Vec<u8>> {
-        anyhow::bail!(
-            "{NOT_SUPPORTED}: sprite-attr-table address unknown on hw target until VDP REG_05 shadow is reachable (TODO M5.8)"
-        );
+        let _ = self.sync_mut()?;
+        let slist_addr = self.symbols.as_ref().map(|s| s.slist_addr).ok_or_else(|| {
+            anyhow::anyhow!(
+                "{NOT_SUPPORTED}: sprite table unavailable: ELF symbols not loaded — \
+                 pass --edpro-elf <path> at startup or rebuild ROM with debug + .symtab"
+            )
+        })?;
+        let s = self.sync_mut()?;
+        // Step 1: read u16 from work RAM at &slist_addr (big-endian).
+        let raw = s
+            .read_memory(slist_addr, 2)
+            .await
+            .map_err(|e| anyhow::anyhow!("get_sprites: read slist_addr failed: {e}"))?;
+        if raw.len() != 2 {
+            anyhow::bail!("get_sprites: slist_addr read returned {} bytes (expected 2)", raw.len());
+        }
+        let vram_offset = u16::from_be_bytes([raw[0], raw[1]]) as u32;
+
+        // Step 2: pull SAT (80 sprites × 8 bytes = 640 B) chunked at
+        // VRAM_CHUNK_MAX. The stub silently truncates oversized
+        // requests, hence the manual loop.
+        const SAT_TOTAL: u32 = 80 * 8;
+        const CHUNK: u32 = stub_sync::VRAM_CHUNK_MAX;
+        let mut out: Vec<u8> = Vec::with_capacity(SAT_TOTAL as usize);
+        let mut off: u32 = 0;
+        while off < SAT_TOTAL {
+            let len = (SAT_TOTAL - off).min(CHUNK);
+            let mut chunk = s
+                .read_vram(vram_offset.wrapping_add(off), len)
+                .await
+                .map_err(|e| anyhow::anyhow!("get_sprites: read_vram@{:x}+{}: {e}", vram_offset, off))?;
+            if chunk.len() as u32 != len {
+                anyhow::bail!(
+                    "get_sprites: short VRAM chunk: got {} expected {} at offset {}",
+                    chunk.len(),
+                    len,
+                    off
+                );
+            }
+            out.append(&mut chunk);
+            off += len;
+        }
+        Ok(out)
     }
 
     /// `mega_dump_tile` — read 32 bytes (one 4bpp 8x8 tile) from VRAM at
@@ -978,8 +1097,10 @@ mod tests {
         t.connect_mock(m).await.unwrap();
         // M5.7 wired `get_palettes` + `dump_tile` to qMds* monitor cmds —
         // those are tested in their own dedicated tests below.
-        // `get_sprites` + `screenshot` remain NOT_SUPPORTED until M5.8 lands
-        // the VDP register shadow.
+        // `screenshot` remains NOT_SUPPORTED until M5.8b lands the
+        // synthesised frame path. M5.8a wires `get_sprites` to the SGDK
+        // ELF-shadow path; without symbols loaded it still bails with
+        // NOT_SUPPORTED, which is what we assert here.
         for e in [
             t.load_rom(std::path::Path::new("/tmp/x")).await.unwrap_err().to_string(),
             t.unload_rom().await.unwrap_err().to_string(),
@@ -1051,13 +1172,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_sprites_blocked_on_m58_with_explicit_msg() {
+    async fn get_sprites_without_symbols_errors_clearly() {
+        // Connected but no SgdkSymbols → must surface the "ELF symbols
+        // not loaded" hint so the IDE can render an actionable message.
         let mut t = EdProTarget::new(EdProConfig::default());
         let (m, _log) = make_mock(vec![]);
         t.connect_mock(m).await.unwrap();
         let e = t.get_sprites().await.unwrap_err().to_string();
-        assert!(e.contains(NOT_SUPPORTED));
-        assert!(e.contains("REG_05") || e.contains("M5.8"), "msg should reference REG_05/M5.8: {e}");
+        assert!(e.contains(NOT_SUPPORTED), "must include NOT_SUPPORTED tag: {e}");
+        assert!(
+            e.contains("ELF symbols not loaded") || e.contains("--edpro-elf"),
+            "msg must hint at the elf-path fix, got: {e}"
+        );
     }
 
     #[tokio::test]
@@ -1162,24 +1288,94 @@ mod tests {
         assert!(tx_contains(&log, b"qSupported"), "qSupported missing");
     }
 
-    // --- get_vdp_registers ---------------------------------------------
+    // --- get_vdp_registers / get_sprites — M5.8a SGDK shadow path ----
+
+    /// Helper: build an `SgdkSymbols` with the canonical work-RAM layout
+    /// used by the M5.8a tests. Every value is plausible (in the
+    /// `$00FF_xxxx` work-RAM window) so the addresses look like the real
+    /// thing on hardware.
+    fn fixture_symbols() -> SgdkSymbols {
+        SgdkSymbols {
+            reg_values: 0x00FF_1234,
+            bga_addr: 0x00FF_2000,
+            bgb_addr: 0x00FF_2002,
+            slist_addr: 0x00FF_2004,
+            window_addr: 0x00FF_2006,
+            hscroll: 0x00FF_2008,
+            palette_cache: None,
+        }
+    }
 
     #[tokio::test]
-    async fn get_vdp_registers_reads_24_bytes_from_c00004() {
-        // Build a 24-byte hex blob (48 hex chars).
+    async fn get_vdp_registers_without_symbols_errors_clearly() {
+        let mut t = EdProTarget::new(EdProConfig::default());
+        let (m, _log) = make_mock(vec![]);
+        t.connect_mock(m).await.unwrap();
+        let e = t.get_vdp_registers().await.unwrap_err().to_string();
+        assert!(e.contains(NOT_SUPPORTED), "must include NOT_SUPPORTED tag: {e}");
+        assert!(
+            e.contains("ELF symbols not loaded") || e.contains("--edpro-elf"),
+            "msg must hint at the elf-path fix, got: {e}"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_vdp_registers_with_symbols_reads_19_bytes_from_reg_values_addr() {
+        // 19 bytes of hex payload (38 hex chars).
         let mut hex = String::new();
-        for i in 0..24u8 {
+        for i in 0..19u8 {
             hex.push_str(&format!("{i:02x}"));
         }
         let mut t = EdProTarget::new(EdProConfig::default());
         let (m, log) = make_mock(vec![rep(hex.as_bytes(), false)]);
-        t.connect_mock(m).await.unwrap();
+        t.attach_with_elf(m, fixture_symbols()).await.unwrap();
         let regs = t.get_vdp_registers().await.unwrap();
-        assert_eq!(regs.len(), 24);
+        assert_eq!(regs.len(), 19);
         assert_eq!(regs[0], 0);
-        assert_eq!(regs[23], 23);
-        // And the `m` packet referenced VDP_REGS_BASE.
-        let needle = rsp::encode_packet(b"mc00004,18");
-        assert!(tx_contains(&log, &needle));
+        assert_eq!(regs[18], 18);
+        // The `m` packet must reference reg_values addr (0xFF1234, len 0x13).
+        let needle = rsp::encode_packet(b"mff1234,13");
+        assert!(tx_contains(&log, &needle), "expected mff1234,13 in tx log");
+    }
+
+    #[tokio::test]
+    async fn get_sprites_with_symbols_reads_slist_then_vram() {
+        // First reply: 2-byte BE u16 = 0xF400 (the SAT VRAM offset).
+        // Then: 5 chunks of 128-byte VRAM hex blobs (640 / 128 = 5).
+        // Each chunk filled with a known sentinel byte for assertions.
+        let mut replies: Vec<Vec<u8>> = Vec::new();
+        replies.push(rep(b"f400", false));
+        for chunk_idx in 0..5u8 {
+            let mut hex = String::new();
+            for _ in 0..128u32 {
+                // sentinel: high nibble = chunk index, low nibble fixed
+                hex.push_str(&format!("{:02x}", 0xA0 | chunk_idx));
+            }
+            replies.push(rep(hex.as_bytes(), false));
+        }
+        let mut t = EdProTarget::new(EdProConfig::default());
+        let (m, log) = make_mock(replies);
+        t.attach_with_elf(m, fixture_symbols()).await.unwrap();
+        let sprites = t.get_sprites().await.unwrap();
+        assert_eq!(sprites.len(), 80 * 8, "must return all 640 SAT bytes");
+        // First chunk byte = 0xA0, last chunk byte = 0xA4.
+        assert_eq!(sprites[0], 0xA0);
+        assert_eq!(sprites[639], 0xA4);
+
+        // Wire log: must contain the `m<slist_addr>,2` read AND the
+        // first qMdsVram@F400 chunk (others follow immediately after).
+        let m_slist = rsp::encode_packet(b"mff2004,2");
+        assert!(tx_contains(&log, &m_slist), "m<slist_addr>,2 missing");
+        let q_vram_first = rsp::encode_packet(b"qMdsVram:f400,80");
+        assert!(tx_contains(&log, &q_vram_first), "qMdsVram@f400,80 missing");
+    }
+
+    #[tokio::test]
+    async fn attach_with_elf_caches_symbols_table() {
+        let mut t = EdProTarget::new(EdProConfig::default());
+        let (m, _log) = make_mock(vec![]);
+        t.attach_with_elf(m, fixture_symbols()).await.unwrap();
+        assert!(t.symbols().is_some());
+        assert_eq!(t.symbols().unwrap().slist_addr, 0x00FF_2004);
     }
 }

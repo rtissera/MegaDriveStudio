@@ -16,6 +16,8 @@
 //! return `Ok(None)` defaults that tool handlers translate into
 //! `not_supported_on_target` errors.
 
+use std::path::PathBuf;
+
 pub mod edpro;
 pub mod emulator;
 
@@ -72,6 +74,16 @@ pub struct EdProConfig {
     /// the IDE auto-attach UX work in M5.6+.
     #[allow(dead_code)]
     pub auto_detect_port: bool,
+    /// Path to a debug ELF (built with `make debug` — `-g` keeps `.symtab`).
+    /// At `connect()` time the EdPro target parses this file and extracts
+    /// the work-RAM addresses of SGDK's VDP-state shadow globals
+    /// (`regValues`, `bga_addr`, `bgb_addr`, `slist_addr`, `window_addr`,
+    /// `hscroll`, optionally `palette_cache`). Without it,
+    /// `mega_get_vdp_registers` and `mega_get_sprites` surface a clear
+    /// "ELF symbols not loaded" error — the VDP register file is
+    /// write-only on hardware so we can't recover those addresses any
+    /// other way.
+    pub elf_path: Option<PathBuf>,
 }
 
 impl EdProConfig {
@@ -86,6 +98,7 @@ impl Default for EdProConfig {
             port: None,
             baud: Self::DEFAULT_BAUD,
             auto_detect_port: false,
+            elf_path: None,
         }
     }
 }

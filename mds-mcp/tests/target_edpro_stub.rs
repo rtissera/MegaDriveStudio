@@ -46,14 +46,15 @@ async fn edpro_stub_surface() {
     // `not_supported_on_target` (these never need a live transport).
     // M5.7: `mega_get_palettes` and `mega_dump_tile` flipped from
     // permanently_unsupported to needs_connection (they now have real
-    // qMds* implementations behind `StubSync`). `mega_get_sprites` and
-    // `mega_screenshot` remain permanently NOT_SUPPORTED until M5.8
-    // surfaces a host-side VDP register shadow.
+    // qMds* implementations behind `StubSync`). M5.8a: `mega_get_sprites`
+    // is now wired to the SGDK ELF-shadow path; against a *disconnected*
+    // target it surfaces `not_connected` first (sync_mut runs before the
+    // symbols check) so it's moved into `needs_connection` below.
+    // `mega_screenshot` remains permanently NOT_SUPPORTED until M5.8b.
     let permanently_unsupported = [
         ("mega_load_rom", json!({"path": "/tmp/x.bin"})),
         ("mega_unload_rom", json!({})),
         ("mega_step_frame", json!({})),
-        ("mega_get_sprites", json!({})),
         ("mega_get_z80_registers", json!({})),
         ("mega_screenshot", json!({})),
         ("mega_save_state", json!({})),
@@ -90,6 +91,7 @@ async fn edpro_stub_surface() {
         ("mega_get_vdp_registers", json!({})),
         ("mega_get_palettes", json!({})),
         ("mega_dump_tile", json!({"index":0})),
+        ("mega_get_sprites", json!({})),
     ];
     for (i, (name, args)) in needs_connection.into_iter().enumerate() {
         let id = 200i64 + i as i64;
