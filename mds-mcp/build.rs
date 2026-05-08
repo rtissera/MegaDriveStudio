@@ -43,28 +43,36 @@ pub struct libra_config_t {
 }
 "#;
 
-/// Synthetic 32-byte placeholder blob, used when the real m68k toolchain
+/// Synthetic 40-byte placeholder blob, used when the real m68k toolchain
 /// isn't available so `cargo check` / `cargo build` still succeed.
 ///
-/// Layout matches `parse_header` in `target::edpro::stub_blob`:
-/// MAGIC ('MDST'), entry_trace, entry_trap1, reserved=0, then 16 bytes
-/// of NOPs (`0x4E71` repeated). Both entry points sit inside the
-/// placeholder body (header is 16 bytes, code starts at +16) so they
-/// land in NOPs rather than off the end of the blob — but they are
-/// deliberately distinct to mirror a real build, where the trace and
-/// trap1 handlers live at different offsets. Anyone actually running
-/// this on hardware will spin in NOPs forever, which is the desired
-/// loud failure mode.
+/// Layout matches `parse_header` in `target::edpro::stub_blob` (24-byte
+/// header):
+///   +0x00 MAGIC ('MDST')
+///   +0x04 entry_trace
+///   +0x08 entry_trap1
+///   +0x0C entry_vbl
+///   +0x10 paused_flag   (must be 0)
+///   +0x14 original_vbl  (must be 0)
+///   +0x18 .. NOPs (`0x4E71` repeated) as the placeholder body.
+/// Entry points sit inside the body so they land in NOPs rather than off
+/// the end of the blob — but they are deliberately distinct to mirror a
+/// real build, where the trace / trap1 / vbl handlers live at different
+/// offsets. Anyone actually running this on hardware will spin in NOPs
+/// forever, which is the desired loud failure mode.
 const PLACEHOLDER_LOAD_ADDR: u32 = 0x0030_0000;
-const PLACEHOLDER_ENTRY_TRACE: u32 = PLACEHOLDER_LOAD_ADDR + 0x10; // first NOP
-const PLACEHOLDER_ENTRY_TRAP1: u32 = PLACEHOLDER_LOAD_ADDR + 0x14; // third NOP
+const PLACEHOLDER_ENTRY_TRACE: u32 = PLACEHOLDER_LOAD_ADDR + 0x18; // first NOP
+const PLACEHOLDER_ENTRY_TRAP1: u32 = PLACEHOLDER_LOAD_ADDR + 0x1C; // third NOP
+const PLACEHOLDER_ENTRY_VBL: u32 = PLACEHOLDER_LOAD_ADDR + 0x20; // fifth NOP
 
 fn write_placeholder_stub(out: &Path) -> std::io::Result<()> {
-    let mut blob = Vec::with_capacity(32);
+    let mut blob = Vec::with_capacity(40);
     blob.extend_from_slice(&0x4D44_5354u32.to_be_bytes()); // 'MDST'
     blob.extend_from_slice(&PLACEHOLDER_ENTRY_TRACE.to_be_bytes());
     blob.extend_from_slice(&PLACEHOLDER_ENTRY_TRAP1.to_be_bytes());
-    blob.extend_from_slice(&0u32.to_be_bytes()); // reserved
+    blob.extend_from_slice(&PLACEHOLDER_ENTRY_VBL.to_be_bytes());
+    blob.extend_from_slice(&0u32.to_be_bytes()); // paused_flag
+    blob.extend_from_slice(&0u32.to_be_bytes()); // original_vbl
     for _ in 0..8 {
         blob.extend_from_slice(&0x4E71u16.to_be_bytes()); // NOP
     }

@@ -52,7 +52,6 @@ async fn edpro_stub_surface() {
     let permanently_unsupported = [
         ("mega_load_rom", json!({"path": "/tmp/x.bin"})),
         ("mega_unload_rom", json!({})),
-        ("mega_pause", json!({})),
         ("mega_step_frame", json!({})),
         ("mega_get_sprites", json!({})),
         ("mega_get_z80_registers", json!({})),
@@ -79,6 +78,7 @@ async fn edpro_stub_surface() {
     // Disconnected target ⇒ structured `not_connected` reason. These are
     // the M5.5 wired methods exposed via M5.6 dispatcher plumbing.
     let needs_connection = [
+        ("mega_pause", json!({})),
         ("mega_resume", json!({})),
         ("mega_continue", json!({})),
         ("mega_step_instruction", json!({})),
