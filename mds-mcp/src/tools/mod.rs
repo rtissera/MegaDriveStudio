@@ -274,7 +274,13 @@ impl MdsServer {
             let lock = self.edpro_target();
             let mut t = lock.lock().await;
             return Ok(match t.pause().await {
-                Ok(()) => ok_json(serde_json::json!({"ok": true})),
+                // M5.9: pause returns the stub's stop reply on success.
+                // Surface the signal number for the IDE; details (BP/swbreak/...)
+                // can be queried separately via mega_get_68k_registers etc.
+                Ok(stop) => ok_json(serde_json::json!({
+                    "ok": true,
+                    "stop": format!("{stop:?}"),
+                })),
                 Err(e) => classify_edpro_err("mega_pause", &e),
             });
         }

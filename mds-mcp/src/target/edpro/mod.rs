@@ -33,6 +33,7 @@
 pub mod framing;
 pub mod proto;
 pub mod rsp;
+pub mod serial;
 pub mod stub_blob;
 pub mod stub_sync;
 pub mod usb;
@@ -127,6 +128,31 @@ pub struct EdProTarget {
     /// Features parsed from `qSupported` during the handshake. Cached so
     /// `get_status` can surface them without round-tripping again.
     features: Vec<(String, String)>,
+    /// M5.9: VBL thunk entry-point parsed from the blob header at attach
+    /// time. Used as the destination address when the host patches
+    /// vector `$78` to arm a pause.
+    entry_vbl: u32,
+    /// M5.9: PSRAM blob load address (echo of `stub_blob::STUB_LOAD_ADDR.0`).
+    /// Held alongside `entry_vbl` so the pause/unpause path doesn't have
+    /// to re-parse the embedded blob.
+    blob_load_addr: u32,
+    /// M5.9: state captured during a pause; `Some` while the VBL hijack
+    /// is armed/active, `None` otherwise. Tracked so `resume()` knows
+    /// whether it must run the unpause memory-ops dance before letting
+    /// the CPU go.
+    paused: Option<PausedState>,
+}
+
+/// Snapshot stashed by [`EdProTarget::pause`] for the resume path.
+#[derive(Debug, Clone)]
+struct PausedState {
+    /// User VBL handler captured before we patched vector `$78` —
+    /// must be written back as part of `unpause`.
+    original_vbl: u32,
+    /// Most recent stop reply sent by the stub when the pause fired.
+    /// Held for callers that want to inspect why we halted.
+    #[allow(dead_code)]
+    stop: StopReply,
 }
 
 impl EdProTarget {
@@ -136,6 +162,9 @@ impl EdProTarget {
             sync: None,
             connected: false,
             features: Vec::new(),
+            entry_vbl: 0,
+            blob_load_addr: stub_blob::STUB_LOAD_ADDR.0,
+            paused: None,
         }
     }
 
@@ -148,7 +177,10 @@ impl EdProTarget {
     }
 
     pub fn port_str(&self) -> String {
-        self.cfg.port.to_string_lossy().into_owned()
+        self.cfg
+            .port
+            .clone()
+            .unwrap_or_else(|| "<unset>".to_string())
     }
 
     /// Cached feature list from `qSupported`.
@@ -160,32 +192,35 @@ impl EdProTarget {
     /// CPU, deploys the on-cart 68k debug stub via `MEM_WR`, releases the
     /// CPU, and runs the gdb handshake.
     ///
-    /// **Not yet wired.** The serial-port transport (M5.7) is the only
-    /// missing piece: once it lands, this becomes:
+    /// Steps (cf. M5 architecture doc §6 "krikzz halt-first pattern"):
     ///
-    /// ```ignore
-    /// let mut t: Box<dyn UsbTransport + Send> = Box::new(SerialUsb::open(&self.cfg.port)?);
-    /// proto::host_reset(&mut t, ResetMode::Soft).await?;  // step 1: halt CPU
-    /// stub_blob::deploy(&mut t, stub_blob::STUB_BLOB).await?; // steps 2..5
-    /// // step 6: optional pre-set BPs (host responsibility, e.g. main())
-    /// proto::host_reset(&mut t, ResetMode::Off).await?;   // step 7: release CPU
-    /// self.connect_mock(t).await                          // step 8: handshake on first stop
-    /// ```
+    /// 1. Resolve `cfg.port` (must be `Some`; we never auto-guess).
+    /// 2. [`serial::SerialUsb::open`] at `cfg.baud` (CDC ignores baud).
+    /// 3. Run [`Self::deploy_stub_then_handshake`] against the live
+    ///    transport, which performs the host-reset / stub-upload /
+    ///    vector-patch / handshake sequence.
     ///
-    /// Until the SerialUsb transport exists, callers in tests use
-    /// [`Self::connect_mock`] (handshake only) or the test
-    /// [`Self::deploy_stub_then_handshake`] which exercises the full
-    /// upload+vector-patch flow against a `MockUsb`.
+    /// Errors:
+    /// - `cfg.port == None` → `port required` (with NOT_SUPPORTED tag so
+    ///   the IDE's structured-error pathway routes it through the same
+    ///   "configure target" dialog as other unsupported-on-target tools).
+    /// - serial open failure → port-tagged anyhow error from
+    ///   [`serial::SerialUsb::open`] (ENOENT / EACCES are pre-mapped).
+    /// - any handshake / mem-write error → propagated verbatim.
     pub async fn connect(&mut self) -> anyhow::Result<()> {
-        // TODO M5.5b: open serial transport, then call
-        // `Self::deploy_stub_then_handshake` with the live `Box<dyn
-        // UsbTransport + Send>`. The deployment logic itself is fully
-        // covered by `stub_blob::deploy` + `connect_mock` integration tests
-        // — the gating concern is opening `/dev/ttyACM*` reliably.
-        anyhow::bail!(
-            "{NOT_SUPPORTED}: edpro USB transport not yet implemented (port {:?}); use connect_mock in tests",
-            self.cfg.port
-        );
+        let port = self.cfg.port.clone().ok_or_else(|| {
+            anyhow::anyhow!(
+                "{NOT_SUPPORTED}: edpro port required (set --edpro-port=/dev/ttyACM0 or equivalent)"
+            )
+        })?;
+        let baud = if self.cfg.baud == 0 {
+            EdProConfig::DEFAULT_BAUD
+        } else {
+            self.cfg.baud
+        };
+        let transport = serial::SerialUsb::open(&port, baud).await?;
+        let boxed: Box<dyn UsbTransport + Send> = Box::new(transport);
+        self.deploy_stub_then_handshake(boxed).await
     }
 
     /// Test / future-real-USB helper: take an already-open transport, run
@@ -233,6 +268,14 @@ impl EdProTarget {
         self.features = features;
         self.sync = Some(sync);
         self.connected = true;
+        // Cache the VBL entry-point from the blob header so M5.9
+        // pause() doesn't need to re-parse on the hot path. Failure
+        // here is non-fatal (the embedded blob's been validated by the
+        // unit-test in `stub_blob::embedded_blob_has_valid_header`); we
+        // just leave entry_vbl at 0 and let pause() return an error.
+        if let Ok(hdr) = stub_blob::parse_header(stub_blob::STUB_BLOB) {
+            self.entry_vbl = hdr.entry_vbl;
+        }
         Ok(())
     }
 
@@ -271,18 +314,67 @@ impl EdProTarget {
         anyhow::bail!(NOT_SUPPORTED);
     }
 
-    /// `mega_pause` — needs IRQ7 injection on hardware (the stub can't
-    /// stop a running CPU without an external pulse). Tracked as §10 open
-    /// question. Returns `not_supported_on_target` until the mechanism is
-    /// designed.
-    pub async fn pause(&mut self) -> anyhow::Result<()> {
-        anyhow::bail!("{NOT_SUPPORTED}: hardware pause needs IRQ injection (TODO M5.x)");
+    /// `mega_pause` — M5.9: arm a VBL hijack so the next ~16 ms VBL fires
+    /// the stub's RSP loop. Returns the stub's `T05` stop reply.
+    ///
+    /// This is hardware-free: no MCU IRQ injection, no /IPL pin
+    /// manipulation. It works by patching vector `$78` to land in the
+    /// stub on the very next VBL frame; the stub's thunk reads a
+    /// "paused" flag (also in PSRAM, host-writable) and either chains
+    /// to the user's original handler (no pause armed) or enters the
+    /// RSP halt loop (paused).
+    ///
+    /// **Pre-conditions**:
+    /// - `connect()` / `connect_mock()` must have run (stub installed,
+    ///   `entry_vbl` cached from header).
+    /// - The user's ROM must have VBL ints enabled (SGDK does this by
+    ///   default). If VBL is masked at SR level, the pause sits armed
+    ///   forever — `mega_resume` clears it cleanly.
+    pub async fn pause(&mut self) -> anyhow::Result<StopReply> {
+        if self.paused.is_some() {
+            anyhow::bail!("pause: already paused — call mega_resume first");
+        }
+        // Disconnected → not_connected error first (so disconnected callers
+        // get the canonical message). Sync_mut returns the typed error.
+        let _ = self.sync_mut()?;
+        if self.entry_vbl == 0 {
+            anyhow::bail!(
+                "pause: stub VBL entry not cached (header parse failed at connect-time)"
+            );
+        }
+        let blob_load = self.blob_load_addr;
+        let entry_vbl = self.entry_vbl;
+        let s = self.sync_mut()?;
+        let (stop, original_vbl) = s
+            .pause(blob_load, entry_vbl)
+            .await
+            .map_err(|e| anyhow::anyhow!("pause failed: {e}"))?;
+        self.paused = Some(PausedState {
+            original_vbl,
+            stop: stop.clone(),
+        });
+        Ok(stop)
     }
 
-    /// `mega_resume` — RSP `c`, fire-and-forget. We do **not** wait for
-    /// the next stop reply (per M5.4 stub guidance: only stop-reply or
-    /// timeout, never `OK`). The caller polls/notifies separately.
+    /// `mega_resume` — RSP `c`, fire-and-forget. If we're currently
+    /// paused (M5.9 VBL hijack armed), undo the hijack BEFORE sending
+    /// `c` so the stub doesn't re-trap on the next VBL.
+    ///
+    /// We do **not** wait for the next stop reply (per M5.4 stub
+    /// guidance: only stop-reply or timeout, never `OK`). The caller
+    /// polls/notifies separately.
     pub async fn resume(&mut self) -> anyhow::Result<()> {
+        // If paused via M5.9, unpause first: clear the flag, restore
+        // vector $78. Order matters — unpause must finish on the wire
+        // before the stub gets the `c` packet, otherwise a racing VBL
+        // could trip the stub a second time.
+        if let Some(p) = self.paused.take() {
+            let blob_load = self.blob_load_addr;
+            let s = self.sync_mut()?;
+            s.unpause(blob_load, p.original_vbl)
+                .await
+                .map_err(|e| anyhow::anyhow!("unpause failed: {e}"))?;
+        }
         let s = self.sync_mut()?;
         // Send the framed `c` and bail without reading; the stop-reply
         // pump will surface the trap asynchronously in M5.6.
@@ -451,7 +543,7 @@ impl EdProTarget {
         serde_json::json!({
             "target": "edpro",
             "connected": self.connected,
-            "port": self.cfg.port.to_string_lossy(),
+            "port": self.port_str(),
             "bp_count": self.list_breakpoints().len(),
         })
     }
@@ -554,10 +646,63 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connect_real_returns_not_supported() {
+    async fn connect_with_port_none_returns_port_required() {
+        // EdProConfig::default() leaves `port` unset — connect() must
+        // surface the "port required" error tagged with NOT_SUPPORTED so
+        // the MCP error-mapping layer treats it consistently with other
+        // configure-target errors.
         let mut t = EdProTarget::new(EdProConfig::default());
         let e = t.connect().await.unwrap_err().to_string();
         assert!(e.contains(NOT_SUPPORTED), "got: {e}");
+        assert!(
+            e.contains("port required") || e.contains("--edpro-port"),
+            "error should explain how to fix it: {e}"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_with_nonexistent_port_bubbles_serial_error() {
+        // Real serial open path: pass a path that demonstrably doesn't
+        // exist. The error must be port-tagged (so the IDE can render
+        // "<path>: port not found") and must NOT contain NOT_SUPPORTED
+        // (this is a config / hardware error, not a target-capability
+        // mismatch).
+        let bogus = "/tmp/mds_edpro_test_does_not_exist_xyz_12345";
+        let mut t = EdProTarget::new(EdProConfig {
+            port: Some(bogus.to_string()),
+            ..Default::default()
+        });
+        let e = t.connect().await.unwrap_err().to_string();
+        assert!(e.contains(bogus), "error should mention port: {e}");
+        assert!(
+            !e.contains(NOT_SUPPORTED),
+            "serial-open errors are not NOT_SUPPORTED: {e}"
+        );
+    }
+
+    #[test]
+    fn config_default_port_is_none() {
+        let cfg = EdProConfig::default();
+        assert!(cfg.port.is_none(), "default port must be None");
+        assert_eq!(cfg.baud, EdProConfig::DEFAULT_BAUD);
+        assert!(!cfg.auto_detect_port);
+    }
+
+    #[test]
+    fn port_str_when_unset_renders_unset_marker() {
+        let t = EdProTarget::new(EdProConfig::default());
+        assert_eq!(t.port_str(), "<unset>");
+        assert_eq!(t.get_status()["port"], "<unset>");
+    }
+
+    #[test]
+    fn port_str_when_set_renders_path() {
+        let t = EdProTarget::new(EdProConfig {
+            port: Some("/dev/ttyACM0".to_string()),
+            ..Default::default()
+        });
+        assert_eq!(t.port_str(), "/dev/ttyACM0");
+        assert_eq!(t.get_status()["port"], "/dev/ttyACM0");
     }
 
     #[tokio::test]
@@ -712,13 +857,118 @@ mod tests {
     // --- pause / unsupported tools --------------------------------------
 
     #[tokio::test]
-    async fn pause_returns_hardware_only_unsupported() {
+    async fn pause_when_disconnected_propagates_not_connected() {
+        // Pre-M5.9 this test asserted NOT_SUPPORTED + "IRQ". M5.9 wires
+        // pause() to the VBL hijack — so the disconnected case is the
+        // only one that still produces an error string by construction.
         let mut t = EdProTarget::new(EdProConfig::default());
-        let (m, _log) = make_mock(vec![]);
-        t.connect_mock(m).await.unwrap();
         let e = t.pause().await.unwrap_err().to_string();
-        assert!(e.contains(NOT_SUPPORTED), "got: {e}");
-        assert!(e.contains("IRQ"), "should mention IRQ injection: {e}");
+        assert!(
+            e.contains(NOT_SUPPORTED) && e.contains("not connected"),
+            "expected not_connected, got: {e}"
+        );
+    }
+
+    // M5.9 happy-path: pause() runs the VBL hijack via the wire, returns
+    // the stub's stop reply, and stashes the captured original VBL.
+    #[tokio::test]
+    async fn pause_runs_vbl_hijack_and_returns_stop() {
+        let mut t = EdProTarget::new(EdProConfig::default());
+        // After the handshake, the host needs:
+        //   - 4-byte MEM_RD answer (the original VBL handler)
+        //   - 3 MEM_WR ack bytes (one per write)
+        //   - the stub's framed T05 stop reply
+        let original_vbl: u32 = 0x0010_5678;
+        let mut extras: Vec<Vec<u8>> = vec![
+            original_vbl.to_be_bytes().to_vec(),
+            vec![0u8],
+            vec![0u8],
+            vec![0u8],
+            rep(b"T05", false), // no_ack_mode is on after handshake
+        ];
+        // Concatenate into a single canned-reply queue.
+        let mut all = handshake_replies();
+        all.append(&mut extras);
+        let tx_log = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let spy = SpyUsb {
+            inner: MockUsb::with_replies(all),
+            tx_log: tx_log.clone(),
+        };
+        t.connect_mock(Box::new(spy)).await.unwrap();
+
+        let stop = t.pause().await.unwrap();
+        assert!(matches!(stop, StopReply::TrapAt { signal: 0x05, .. }));
+        // After pause, internal state remembers the captured handler.
+        // We can't read it directly (private), but a second call must
+        // refuse with "already paused".
+        let e = t.pause().await.unwrap_err().to_string();
+        assert!(e.contains("already paused"), "got: {e}");
+    }
+
+    // M5.9 unpause: resume() while paused must MEM_WR the unpause
+    // sequence FIRST, then send the RSP `c` packet.
+    #[tokio::test]
+    async fn resume_while_paused_runs_unpause_then_continue() {
+        let mut t = EdProTarget::new(EdProConfig::default());
+        let original_vbl: u32 = 0x0010_5678;
+        let mut extras: Vec<Vec<u8>> = vec![
+            original_vbl.to_be_bytes().to_vec(),
+            vec![0u8],
+            vec![0u8],
+            vec![0u8],
+            rep(b"T05", false),
+            // unpause MEM_WR acks (2 writes)
+            vec![0u8],
+            vec![0u8],
+        ];
+        let mut all = handshake_replies();
+        all.append(&mut extras);
+        let tx_log = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let spy = SpyUsb {
+            inner: MockUsb::with_replies(all),
+            tx_log: tx_log.clone(),
+        };
+        t.connect_mock(Box::new(spy)).await.unwrap();
+        t.pause().await.unwrap();
+        t.resume().await.unwrap();
+
+        // Wire log must contain (in order): MEM_WR vector $78 with
+        // entry_vbl (pause), MEM_WR vector $78 with original_vbl
+        // (unpause), and the RSP `c` packet.
+        let log = tx_log.lock().unwrap().clone();
+        // Find an `original_vbl` payload AFTER an `entry_vbl` payload
+        // (both targeted at vector $78 — both are 13-byte hdr + 4-byte chunk).
+        let entry_vbl_be = stub_blob::parse_header(stub_blob::STUB_BLOB)
+            .unwrap()
+            .entry_vbl
+            .to_be_bytes();
+        let original_vbl_be = original_vbl.to_be_bytes();
+        let pos_entry = log
+            .windows(4)
+            .position(|w| w == entry_vbl_be)
+            .expect("entry_vbl write missing");
+        let pos_orig = log
+            .windows(4)
+            .rposition(|w| w == original_vbl_be)
+            .expect("original_vbl write missing");
+        assert!(pos_orig > pos_entry, "unpause must come after pause");
+        // RSP `c` must appear in the log too.
+        let c_frame = rsp::encode_packet(b"c");
+        assert!(log.windows(c_frame.len()).any(|w| w == c_frame), "c packet missing");
+    }
+
+    // M5.9: resume() while not paused must NOT touch the unpause path.
+    #[tokio::test]
+    async fn resume_when_not_paused_just_sends_continue() {
+        let mut t = EdProTarget::new(EdProConfig::default());
+        let (m, log) = make_mock(vec![]);
+        t.connect_mock(m).await.unwrap();
+        t.resume().await.unwrap();
+        let needle = rsp::encode_packet(b"c");
+        assert!(tx_contains(&log, &needle), "c packet missing");
+        // No MEM_WR opcode bytes should appear (no unpause was needed).
+        let mem_wr = [0x2B, 0xD4, 0x1A, 0xE5];
+        assert!(!log.lock().unwrap().windows(4).any(|w| w == mem_wr));
     }
 
     #[tokio::test]

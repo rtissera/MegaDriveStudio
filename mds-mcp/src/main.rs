@@ -62,9 +62,17 @@ struct Cli {
     #[arg(long, value_name = "KIND", default_value = "emulator")]
     target: String,
 
-    /// Serial port for the EdPro target. Ignored when `--target emulator`.
-    #[arg(long, value_name = "PATH", default_value = "/dev/everdrive")]
-    edpro_port: PathBuf,
+    /// Serial port for the EdPro target (e.g. `/dev/ttyACM0` on Linux,
+    /// `/dev/cu.usbmodemXXX` on macOS, `COM3` on Windows). Ignored when
+    /// `--target emulator`. M5.5b: required when `--target edpro`.
+    #[arg(long, value_name = "PATH")]
+    edpro_port: Option<String>,
+
+    /// USB-CDC baud rate for the EdPro target. CDC ignores the value;
+    /// we expose it for parity with megalink-rs and future RS-232
+    /// transports. Defaults to 9600.
+    #[arg(long, value_name = "BAUD", default_value_t = target::EdProConfig::DEFAULT_BAUD)]
+    edpro_baud: u32,
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -83,6 +91,7 @@ async fn main() -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("unknown --target {:?}", cli.target))?;
     let edpro_cfg = EdProConfig {
         port: cli.edpro_port.clone(),
+        baud: cli.edpro_baud,
         ..Default::default()
     };
 

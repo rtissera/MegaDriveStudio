@@ -70,6 +70,15 @@ static uint32_t g_init_cookie;
 #define MDS_EXC_TRACE   9
 #define MDS_EXC_TRAP1  33
 
+// M5.9: PSRAM-resident header fields, written by the host. The stub itself
+// must reach these via the same PSRAM mapping the 68k uses (the linker
+// places the header at PSRAM `$300000` so `__stub_entry` is a link-fixed
+// address). The `paused_flag` slot is a u32 at offset 0x10 inside the
+// blob — we reach it by indexing off the header. (`original_vbl` at
+// offset 0x14 is read directly by the asm thunk in entry.s.)
+extern uint32_t __stub_entry[];               // declared in entry.s
+#define MDS_HDR_PAUSED_FLAG_INDEX   4         // (0x10 / 4)
+
 // ----------------------------------------------------------------------------
 // VDP MMIO ports (M5.7).
 // ----------------------------------------------------------------------------
@@ -574,3 +583,32 @@ void mds_stub_enter_handler(uint32_t exc_id) {
     send_stop_reply(5, swbreak);   // SIGTRAP
     rsp_loop();
 }
+
+// ----------------------------------------------------------------------------
+// M5.9: VBL hijack pause handler.
+// ----------------------------------------------------------------------------
+//
+// Entry from `__stub_vbl_entry` (entry.s). The asm thunk handles the
+// fast-path `paused_flag == 0` case inline (chain to the user's VBL
+// handler) so we never even enter C. The slow path (paused) calls into
+// `mds_stub_pause_handler` AFTER `mds_save_regs` has dumped the user's
+// register state into `mds_regs[]`. On return, the asm thunk runs
+// `mds_restore_regs` and RTEs.
+//
+// Re-entrancy: if a second VBL fires before the host clears the flag
+// AND restores vector $78, we re-enter. Host design (stub_blob::unpause
+// clears flag FIRST, then restores vector $78) means even a racing VBL
+// sees the flag at 0 and chains to the original handler — no spurious
+// pause loop.
+void mds_stub_pause_handler(void) {
+    bss_init_if_needed();
+    // Always clear T-bit on entry; handle_packet sets it again on `s`.
+    mds_regs[16] &= ~(uint32_t)SR_T_BIT;
+    send_stop_reply(5, 0);   // T05 — generic SIGTRAP
+    rsp_loop();
+    // Resume requested. Clear paused_flag so subsequent VBLs (if any
+    // arrive before the host's vector restore propagates) chain straight
+    // through.
+    __stub_entry[MDS_HDR_PAUSED_FLAG_INDEX] = 0;
+}
+

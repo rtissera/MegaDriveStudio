@@ -16,8 +16,6 @@
 //! return `Ok(None)` defaults that tool handlers translate into
 //! `not_supported_on_target` errors.
 
-use std::path::PathBuf;
-
 pub mod edpro;
 pub mod emulator;
 
@@ -53,20 +51,41 @@ pub const NOT_SUPPORTED: &str = "not_supported_on_target";
 
 /// Configuration for the EdPro stub. Surfaced by the CLI and consumed by
 /// `mds_main` so the stub knows which serial port to *eventually* open.
+///
+/// `port` defaults to `None`; callers must supply an explicit path
+/// (`/dev/ttyACM0`, `/dev/cu.usbmodem*`, `COM3`, ...) before
+/// [`crate::target::edpro::EdProTarget::connect`] will succeed. We
+/// deliberately do **not** guess a default: the EdPro shares its CDC class
+/// id with anything else plugged in (Arduinos, modems...) and silently
+/// opening the wrong device is hostile.
 #[derive(Debug, Clone)]
 pub struct EdProConfig {
-    pub port: PathBuf,
-    /// USB serial baud rate. Hard-coded for the EdPro Pro firmware (921600
-    /// 8N1). Read by the M5.1 transport once the USB protocol lands.
+    pub port: Option<String>,
+    /// USB serial baud rate. CDC-class devices (which the EdPro is) ignore
+    /// the baud value, but we mirror what `ricky26/megalink-rs` opens with
+    /// (9600) for consistency. See `target/edpro/serial.rs` comment.
     #[allow(dead_code)]
     pub baud: u32,
+    /// If `port == None` and this is `true`, `connect()` may try the
+    /// platform-default path (`/dev/ttyACM0` on Linux). Not implemented
+    /// yet: M5.5b ships with port-required semantics only. Reserved for
+    /// the IDE auto-attach UX work in M5.6+.
+    #[allow(dead_code)]
+    pub auto_detect_port: bool,
+}
+
+impl EdProConfig {
+    /// Default baud rate matching `ricky26/megalink-rs` so anyone reusing
+    /// the same cart over the same cable sees identical wire behaviour.
+    pub const DEFAULT_BAUD: u32 = 9600;
 }
 
 impl Default for EdProConfig {
     fn default() -> Self {
         Self {
-            port: PathBuf::from("/dev/everdrive"),
-            baud: 921_600,
+            port: None,
+            baud: Self::DEFAULT_BAUD,
+            auto_detect_port: false,
         }
     }
 }

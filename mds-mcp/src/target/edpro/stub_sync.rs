@@ -20,6 +20,7 @@ use std::fmt;
 use std::io;
 
 use super::proto;
+use super::stub_blob;
 use super::rsp::{
     self, cmd_continue, cmd_qmds_cram, cmd_qmds_vdp_status, cmd_qmds_vram, cmd_qmds_vsram,
     cmd_query_halt_reason, cmd_query_start_no_ack_mode, cmd_query_supported, cmd_read_memory,
@@ -285,6 +286,74 @@ impl<T: UsbTransport> StubSync<T> {
     pub async fn query_halt_reason(&mut self) -> Result<StopReply> {
         let reply = self.send_rsp_packet(&cmd_query_halt_reason()).await?;
         Ok(parse_stop_reply(&reply)?)
+    }
+
+    // -----------------------------------------------------------------
+    // M5.9: pause / unpause via VBL hijack.
+    //
+    // Pause works by patching vector $78 (level-6 IRQ / VBL) to land in
+    // the stub on the next VBL frame, which sees a paused-flag and
+    // enters the RSP loop. The original VBL handler is captured by the
+    // host (via MEM_RD) so the stub's "fast path" can chain to it
+    // until the pause actually fires.
+    //
+    // See `mds-stub-68k/src/entry.s` (header layout + vbl thunk),
+    // `stub_blob::pause` / `stub_blob::unpause` (host-side memory ops),
+    // and `docs/02-m5-architecture.md` §5.9.
+    // -----------------------------------------------------------------
+
+    /// M5.9: arm a pause and wait for the next VBL to land us in the
+    /// stub. Returns a tuple of (`StopReply` from the stub, captured
+    /// `original_vbl` handler addr — caller must hand this back to
+    /// [`Self::unpause`] before resuming).
+    ///
+    /// `blob_load_addr` is the PI-bus address the stub blob lives at
+    /// (typically `stub_blob::STUB_LOAD_ADDR.0 = 0x0030_0000`). It
+    /// drives the offsets to the `paused_flag` / `original_vbl` slots
+    /// inside the blob header.
+    ///
+    /// `entry_vbl` is the absolute 68k address of the stub's VBL thunk
+    /// (parsed from the blob header by `parse_header`). Caller is
+    /// expected to cache this from connect-time.
+    pub async fn pause(
+        &mut self,
+        blob_load_addr: u32,
+        entry_vbl: u32,
+    ) -> Result<(StopReply, u32)> {
+        // Install the VBL hijack. `stub_blob::pause` does MEM_RD + 3
+        // MEM_WRs and returns the captured original handler addr.
+        let original_vbl = stub_blob::pause(&mut self.transport, blob_load_addr, entry_vbl)
+            .await
+            .map_err(|e| StubSyncError::Transport(e.to_string()))?;
+
+        // Wait for the stub's stop reply. We DON'T expect any RSP ack
+        // dance here even in ack-mode-on: the stub's stop reply is an
+        // unsolicited packet (no host packet preceded it), so the host
+        // just sends `+` after consuming it.
+        let raw = self.read_framed_packet().await?;
+        let (decoded, _consumed) = decode_packet(&raw)?;
+        if !self.no_ack_mode {
+            proto::usb_write(&mut self.transport, b"+").await?;
+        }
+        let stop = parse_stop_reply(&decoded)?;
+        Ok((stop, original_vbl))
+    }
+
+    /// M5.9: undo the VBL hijack put in place by [`Self::pause`].
+    /// Order: clear the paused-flag, then restore vector `$78`. The
+    /// caller is responsible for issuing the RSP `c` (or equivalent)
+    /// AFTER this call — by then the stub is no longer trapping any
+    /// VBL at all, so the resume just lets the previously-paused CPU
+    /// continue.
+    pub async fn unpause(
+        &mut self,
+        blob_load_addr: u32,
+        original_vbl: u32,
+    ) -> Result<()> {
+        stub_blob::unpause(&mut self.transport, blob_load_addr, original_vbl)
+            .await
+            .map_err(|e| StubSyncError::Transport(e.to_string()))?;
+        Ok(())
     }
 
     /// After a BP hit at `addr`: restore the original opcode so the CPU can
@@ -808,6 +877,137 @@ mod tests {
             s.read_vram(0, 16).await.unwrap_err(),
             StubSyncError::UnexpectedReply(_)
         ));
+    }
+
+    // ---- M5.9: pause / unpause ------------------------------------------
+
+    /// Build the rx queue for a successful `pause()` call.
+    /// Order is: MEM_RD answer (4 bytes), then 3 MEM_WR per-chunk acks
+    /// (one each for the writes to `original_vbl`, `paused_flag`,
+    /// vector `$78`), then the stop reply from the cart.
+    fn pause_replies(original_vbl: u32, stop_payload: &[u8]) -> Vec<Vec<u8>> {
+        vec![
+            original_vbl.to_be_bytes().to_vec(),
+            vec![0u8],
+            vec![0u8],
+            vec![0u8],
+            // Stop reply isn't framed with a leading `+` — the stub
+            // emits it unsolicited; we'll send `+` BACK after we read it.
+            super::super::rsp::encode_packet(stop_payload),
+        ]
+    }
+
+    #[tokio::test]
+    async fn pause_sends_mem_ops_and_reads_stop_reply() {
+        let blob_load: u32 = 0x0030_0000;
+        let entry_vbl: u32 = 0x0030_0A1C;
+        let original_vbl: u32 = 0x0010_5678;
+
+        let mut s = StubSync::new(MockUsb::with_replies(pause_replies(
+            original_vbl,
+            b"T05",
+        )));
+        // Start in ack-mode-on so we get coverage of the `+` reply path.
+        let (stop, got_vbl) = s.pause(blob_load, entry_vbl).await.unwrap();
+        assert_eq!(got_vbl, original_vbl);
+        assert!(matches!(stop, StopReply::TrapAt { signal: 0x05, .. }));
+
+        // The wire log must contain a MEM_WR to vector $78 with `entry_vbl`
+        // as the payload, AND a `+` ack from the host after the stop reply.
+        let log = s.transport().tx_log();
+        // MEM_WR header (13 bytes) + 4-byte payload — find the vector $78 write.
+        let mut found_vec78 = false;
+        for w in log.windows(8) {
+            if w[..4] == [0x2B, 0xD4, 0x1A, 0xE5]
+                && w[4..8] == 0x78u32.to_be_bytes()
+            {
+                found_vec78 = true;
+                break;
+            }
+        }
+        assert!(found_vec78, "MEM_WR to vector $78 missing from tx log");
+        // The host's `+` ack:
+        let frames = s.transport().tx_frames();
+        assert!(frames.iter().any(|f| f.as_slice() == b"+"));
+    }
+
+    #[tokio::test]
+    async fn pause_no_ack_mode_skips_ack_send() {
+        // After handshake, ack mode is off. Pause should NOT send `+`
+        // back after the stop reply.
+        let mut s = mk(vec![
+            rep(b"PacketSize=190;swbreak+", true),
+            rep(b"OK", true),
+        ]);
+        s.handshake().await.unwrap();
+        assert!(s.no_ack_mode());
+
+        let pre_frames = s.transport().tx_frames().len();
+
+        // Now feed pause replies. The stop reply is bare (no leading `+`).
+        for r in pause_replies(0xCAFE_BABE, b"T05") {
+            s.transport_mut().push_reply(&r);
+        }
+        let (_stop, got_vbl) = s.pause(0x0030_0000, 0x0030_0A1C).await.unwrap();
+        assert_eq!(got_vbl, 0xCAFE_BABE);
+
+        let new = &s.transport().tx_frames()[pre_frames..];
+        assert!(
+            !new.iter().any(|f| f.as_slice() == b"+"),
+            "no_ack_mode pause must not send a `+` ack"
+        );
+    }
+
+    #[tokio::test]
+    async fn unpause_emits_two_mem_writes_in_order() {
+        let blob_load: u32 = 0x0030_0000;
+        let original_vbl: u32 = 0x0010_5678;
+        // 2 MEM_WR ack bytes (one per write).
+        let mut s = StubSync::new(MockUsb::with_replies(vec![vec![0u8], vec![0u8]]));
+        s.unpause(blob_load, original_vbl).await.unwrap();
+
+        let frames = s.transport().tx_frames();
+        let wr_headers: Vec<&[u8]> = frames
+            .iter()
+            .filter(|f| f.len() == 13 && f[0..4] == [0x2B, 0xD4, 0x1A, 0xE5])
+            .map(|v| v.as_slice())
+            .collect();
+        assert_eq!(wr_headers.len(), 2);
+        // Order is documented: clear flag first (offset 0x10), then $78.
+        assert_eq!(
+            &wr_headers[0][4..8],
+            &(blob_load + 0x10).to_be_bytes()
+        );
+        assert_eq!(&wr_headers[1][4..8], &0x78u32.to_be_bytes());
+    }
+
+    #[tokio::test]
+    async fn pause_then_unpause_round_trip() {
+        // Full happy-path: pause arms the hijack, then unpause clears
+        // it. The wire log has the read+3 writes + stop reply on pause,
+        // and 2 writes on unpause.
+        let blob_load: u32 = 0x0030_0000;
+        let entry_vbl: u32 = 0x0030_0A1C;
+        let original_vbl: u32 = 0x0010_5678;
+
+        let mut all = pause_replies(original_vbl, b"T05");
+        all.push(vec![0u8]); // unpause MEM_WR ack 1
+        all.push(vec![0u8]); // unpause MEM_WR ack 2
+        let mut s = StubSync::new(MockUsb::with_replies(all));
+
+        let (_stop, got_vbl) = s.pause(blob_load, entry_vbl).await.unwrap();
+        s.unpause(blob_load, got_vbl).await.unwrap();
+
+        // Tx log contains BOTH a write of `entry_vbl` and a write of
+        // `original_vbl` (the second one comes from unpause).
+        let frames = s.transport().tx_frames();
+        let payloads_4: Vec<&Vec<u8>> = frames.iter().filter(|f| f.len() == 4).collect();
+        assert!(payloads_4
+            .iter()
+            .any(|f| f.as_slice() == entry_vbl.to_be_bytes()));
+        assert!(payloads_4
+            .iter()
+            .any(|f| f.as_slice() == original_vbl.to_be_bytes()));
     }
 
     // ---- Display impls ---------------------------------------------------

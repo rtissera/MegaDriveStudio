@@ -47,6 +47,14 @@ png = "0.17"
 # `Box<dyn UsbTransport>` and native async-fn-in-trait isn't dyn compatible
 # (E0038). Cost is one allocation per call which is dwarfed by USB latency.
 async-trait = "0.1"
+# Async serial transport for the EdPro target (M5.5b). Pinned to 5.4.x —
+# the only line that works with tokio 1.x and ships AsyncRead/AsyncWrite
+# on `SerialStream` for Linux (termios), macOS (IOKit) and Windows (COM).
+# License: MIT. Picked over `serialport` (sync, would force
+# spawn_blocking on every read/write) and hand-rolled termios (Linux-only).
+# Baud is irrelevant on the EdPro (USB-CDC ignores it) but we mirror
+# `ricky26/megalink-rs` (`serialport::new(path, 9600)`) for consistency.
+tokio-serial = "5.4"
 
 [dev-dependencies]
 tokio = { version = "1.41", features = ["full", "process"] }
